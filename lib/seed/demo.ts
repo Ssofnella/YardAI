@@ -7,6 +7,22 @@ import { createAppointment, performCheckIn, publishConfig } from "@/lib/yard/ope
 import { placementByName } from "@/lib/yard/locations";
 import { DAY_SCRIPT, OVERNIGHT } from "@/lib/simulator/script";
 
+export async function backfillExpectedSeals(db: Database): Promise<void> {
+  const columns = await db.query<{ column_name: string }>(
+    `select column_name from information_schema.columns
+     where table_name = 'appointments' and column_name = 'expected_seal'`,
+  );
+  if (!columns.length) return;
+  for (const stop of DAY_SCRIPT) {
+    if (!stop.sealIn) continue;
+    await db.query(
+      `update appointments set expected_seal = $2
+       where appointment_code = $1 and (expected_seal is null or expected_seal = '')`,
+      [stop.code, stop.sealIn],
+    );
+  }
+}
+
 export async function seedIfEmpty(db: Database): Promise<void> {
   const rows = await db.query<{ id: string }>(`select id from companies limit 1`);
   if (rows.length > 0) return;
@@ -77,6 +93,7 @@ export async function seedOperational(db: Database): Promise<void> {
       emptyOrLoaded: stop.emptyOrLoaded,
       isReefer: stop.isReefer,
       setpointF: stop.setpointF,
+      expectedSeal: stop.sealIn,
       plannedAt: addMinutes(dayStart, stop.plannedMinute).toISOString(),
       occurredAt: createdAt,
       source: "simulator",

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   TIMEZONES,
+  defaultPolicies,
   slugKey,
   validateSnapshot,
   type CheckInField,
@@ -27,7 +28,7 @@ import {
 } from "@/components/ui/dialog";
 import { useYard } from "@/components/yard-provider";
 
-const STEPS = ["Site", "Doors", "Yard", "Statuses", "Check-in form", "Review"] as const;
+const STEPS = ["Site", "Doors", "Yard", "Statuses", "Check-in form", "Rules", "Review"] as const;
 
 export function SetupWizard() {
   const { state, mutate } = useYard();
@@ -207,8 +208,9 @@ export function SetupWizard() {
       {step === 2 ? <YardStep draft={draft} update={update} /> : null}
       {step === 3 ? <StatusStep draft={draft} update={update} /> : null}
       {step === 4 ? <FormStep draft={draft} update={update} /> : null}
+      {step === 5 ? <RulesStep draft={draft} update={update} /> : null}
 
-      {step === 5 ? (
+      {step === 6 ? (
         <div className="flex flex-col gap-4">
           <div className="rounded-xl border border-border bg-card p-4 text-sm">
             <p className="font-semibold">
@@ -364,6 +366,7 @@ function YardStep({
             <option value="dry">Dry</option>
             <option value="reefer">Reefer plug</option>
             <option value="staging">Staging</option>
+            <option value="holding">Holding</option>
             <option value="out_of_service">Out of service</option>
           </select>
         </Field>
@@ -676,6 +679,96 @@ function newDoor(n: number, existing: { name: string }[]) {
   let name = `D${String(n).padStart(2, "0")}`;
   while (existing.some((door) => door.name === name)) name = `${name}B`;
   return { id: crypto.randomUUID(), name, type: "dry" as const, sort: n };
+}
+
+function RulesStep({
+  draft,
+  update,
+}: {
+  draft: SiteConfigSnapshot;
+  update: (partial: Partial<SiteConfigSnapshot>) => void;
+}) {
+  const policies = draft.policies ?? defaultPolicies();
+  function setPolicies(partial: Partial<typeof policies>) {
+    update({ policies: { ...policies, ...partial } });
+  }
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <Field label="Device">
+        <select className={controlClass} value={policies.deviceType} onChange={(event) => setPolicies({ deviceType: event.target.value as typeof policies.deviceType })}>
+          <option value="ipad_landscape">iPad landscape</option>
+          <option value="ipad_portrait">iPad portrait</option>
+          <option value="android_tablet">Android tablet</option>
+          <option value="phone">Phone</option>
+        </select>
+      </Field>
+      <Field label="Language">
+        <select className={controlClass} value={policies.locale} onChange={(event) => setPolicies({ locale: event.target.value === "es" ? "es" : "en" })}>
+          <option value="en">English</option>
+          <option value="es">Español (catalog not shipped yet)</option>
+        </select>
+      </Field>
+      <Field label="Gates">
+        <select className={controlClass} value={String(policies.gateCount)} onChange={(event) => setPolicies({ gateCount: event.target.value === "2" ? 2 : 1 })}>
+          <option value="1">One gate</option>
+          <option value="2">Two gates</option>
+        </select>
+      </Field>
+      <Field label="Spot numbers">
+        <select className={controlClass} value={policies.spotsNumbered ? "yes" : "no"} onChange={(event) => setPolicies({ spotsNumbered: event.target.value === "yes" })}>
+          <option value="yes">Numbered spots</option>
+          <option value="no">Unnumbered rows</option>
+        </select>
+      </Field>
+      <Field label="Seal mismatch">
+        <select className={controlClass} value={policies.sealMismatchPolicy} onChange={(event) => setPolicies({ sealMismatchPolicy: event.target.value as typeof policies.sealMismatchPolicy })}>
+          <option value="allow_with_reason">Hold or accept with a reason</option>
+          <option value="hold">Hold only</option>
+          <option value="note">Note it and keep moving</option>
+        </select>
+      </Field>
+      <Field label="Who can clear TEMP">
+        <select
+          className={controlClass}
+          value={policies.clearTempRoles.includes("gate") ? "all" : "office"}
+          onChange={(event) =>
+            setPolicies({
+              clearTempRoles: event.target.value === "all" ? ["admin", "office", "gate"] : ["admin", "office"],
+            })
+          }
+        >
+          <option value="office">Office and admin</option>
+          <option value="all">Gate can clear it too</option>
+        </select>
+      </Field>
+      <Field label="Temperature tolerance (°F)">
+        <input
+          className={controlClass}
+          type="number"
+          min={0}
+          max={40}
+          value={draft.reefer.tempToleranceF}
+          onChange={(event) => update({ reefer: { ...draft.reefer, tempToleranceF: Number(event.target.value) } })}
+        />
+      </Field>
+      <Field label="Low fuel at or below">
+        <select className={controlClass} value={policies.lowFuelAtOrBelow} onChange={(event) => setPolicies({ lowFuelAtOrBelow: event.target.value as typeof policies.lowFuelAtOrBelow })}>
+          <option value="E">E</option>
+          <option value="1/4">1/4</option>
+          <option value="1/2">1/2</option>
+        </select>
+      </Field>
+      <Field label="Free time (minutes)">
+        <input className={controlClass} type="number" min={0} max={1440} value={policies.freeTimeMinutes} onChange={(event) => setPolicies({ freeTimeMinutes: Number(event.target.value) })} />
+      </Field>
+      <Field label="Warn before free time (minutes)">
+        <input className={controlClass} type="number" min={0} value={policies.warnBeforeMinutes} onChange={(event) => setPolicies({ warnBeforeMinutes: Number(event.target.value) })} />
+      </Field>
+      <p className="md:col-span-2 text-sm text-muted-foreground">
+        Blind seal entry is {policies.blindSealEntry ? "on" : "off"}. The expected seal stays hidden until the clerk checks what is on the trailer.
+      </p>
+    </div>
+  );
 }
 
 function addSpots(

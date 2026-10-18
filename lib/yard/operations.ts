@@ -2,8 +2,9 @@ import type { SiteConfigSnapshot } from "@/lib/domain/config";
 import { validateSnapshot } from "@/lib/domain/config";
 import { createEvent, type EventSource, type YardEvent } from "@/lib/domain/events";
 import { matchArrival, type ArrivalKey } from "@/lib/domain/matching";
-import { reeferAlerts } from "@/lib/domain/reefer";
+import { fuelMarkToPct, reeferAlerts } from "@/lib/domain/reefer";
 import { checkSeals } from "@/lib/domain/seals";
+import { canClearTemp, resolveSealFlow, type SealDecision } from "@/lib/domain/seal-flow";
 import type { Database, Sql } from "@/lib/db/types";
 import { YardError } from "@/lib/db/types";
 import { asIso, asJson } from "@/lib/db/json";
@@ -36,6 +37,20 @@ export type CheckInInput = {
   statusKey?: string | null;
   occurredAt?: string | Date;
   source: EventSource;
+  /** Client outbox id. A repeat of the same id is a no-op. */
+  commandId?: string | null;
+  /** Client UUID for the gate.check_in event. */
+  eventId?: string | null;
+  /** Stamped when New arrival was tapped. May be earlier than submit time. */
+  arrivedAt?: string | null;
+  arrivalReason?: string | null;
+  deviceId?: string | null;
+  deviceTime?: string | null;
+  sealDecision?: SealDecision | null;
+  sealReason?: string | null;
+  unitRunning?: boolean | null;
+  fuelLevel?: string | null;
+  gateName?: string | null;
 };
 
 export type OperationResult = {
@@ -43,6 +58,7 @@ export type OperationResult = {
   events: YardEvent[];
   flags: VisitFlag[];
   notice: string | null;
+  duplicate?: boolean;
 };
 
 type AppointmentRow = {
@@ -60,6 +76,7 @@ type AppointmentRow = {
   is_reefer: boolean;
   setpoint_f: number | null;
   planned_at: string | Date;
+  expected_seal: string | null;
   status: string;
 };
 
@@ -69,6 +86,25 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
     const config = await loadConfig(tx, site);
     const clock = await readClock(tx, site.id);
     const occurredAt = input.occurredAt ? new Date(input.occurredAt).toISOString() : clock.asOf;
+    const commandId = blank(input.commandId);
+    if (commandId) {
+      const prior = await tx.query<{ visit_id: string | null }>(
+        `select visit_id from events
+         where event_type = 'gate.check_in' and payload->>'commandId' = $1
+         limit 1`,
+        [commandId],
+      );
+      if (prior[0]) {
+        return {
+          visitId: prior[0].visit_id,
+          events: [],
+          flags: [],
+          notice: "Already saved",
+          duplicate: true,
+        };
+      }
+    }
+    const arrivedAt = resolveArrivalStamp(occurredAt, input.arrivedAt, input.arrivalReason);
     const trailerNumber = input.trailerNumber.trim();
     const scac = input.scac.trim().toUpperCase();
     if (!trailerNumber || !scac) throw new YardError("Trailer number and SCAC are required");
@@ -106,8 +142,7 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
     assertRequiredFields(config.snapshot, input, isReefer);
 
     const occupied = await occupiedLocationIds(tx, site.id);
-    const placement = resolveCheckInPlace(config.snapshot, occupied, input);
-    if (occupied.has(placement.id)) throw new YardError(`${placement.label} is already occupied`);
+    let placement = resolveCheckInPlace(config.snapshot, occupied, input);
 
     const emptyOrLoaded = input.emptyOrLoaded === "empty" ? "empty" : "loaded";
     const loadType = (input.loadType || "inbound").trim();
@@ -115,25 +150,72 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
       input.carrierName?.trim() ||
       (await carrierNameFor(tx, site.companyId, scac)) ||
       "Unknown carrier";
+    const fuelFromMark = fuelMarkToPct(input.fuelLevel);
+    const fuelPct = fuelFromMark ?? input.fuelPct ?? null;
     const alerts = reeferAlerts(
       {
         isReefer,
         setpointF: input.setpointF ?? null,
         tempF: input.tempF ?? null,
-        fuelPct: input.fuelPct ?? null,
+        fuelPct,
+        fuelLevel: input.fuelLevel ?? null,
+        unitRunning: input.unitRunning ?? null,
       },
-      config.snapshot.reefer,
+      {
+        ...config.snapshot.reefer,
+        lowFuelAtOrBelow: config.snapshot.policies.lowFuelAtOrBelow,
+      },
     );
+
+    const matched = match.appointment;
+    const appointment = matched ? (expected.find((row) => row.id === matched.id) ?? null) : null;
+    const expectedSeal = appointment?.expected_seal ?? null;
+    const sealFlow = resolveSealFlow({
+      expectedSeal,
+      foundSeal: input.sealNumber,
+      decision: input.sealDecision,
+      reason: input.sealReason,
+      policy: config.snapshot.policies.sealMismatchPolicy,
+      loaded: emptyOrLoaded === "loaded",
+    });
+    if (sealFlow.error) throw new YardError(sealFlow.error);
+    if (sealFlow.hold && placement.spotType !== "holding") {
+      const holding = config.snapshot.spots.find(
+        (spot) => spot.type === "holding" && !occupied.has(spot.id),
+      );
+      if (holding) placement = placementById(config.snapshot, "spot", holding.id);
+    }
+    if (occupied.has(placement.id)) throw new YardError(`${placement.label} is already occupied`);
 
     const flags: VisitFlag[] = [];
     if (match.idMismatch) {
       flags.push({ code: "id_mismatch", detail: match.reasons.join(" ") });
     }
-    if (alerts.tempOutOfRange) flags.push({ code: "reefer_temp", detail: alerts.reasons[0] ?? "Temperature" });
+    if (alerts.tempOutOfRange) {
+      flags.push({
+        code: "reefer_temp",
+        detail: alerts.reasons.find((reason) => reason.startsWith("Reefer")) ?? "Temperature",
+      });
+    }
     if (alerts.fuelLow) {
       flags.push({
         code: "reefer_fuel",
         detail: alerts.reasons.find((reason) => reason.startsWith("Fuel")) ?? "Fuel",
+      });
+    }
+    if (alerts.unitOff) flags.push({ code: "reefer_unit", detail: "Unit not running." });
+    if (sealFlow.flag) {
+      flags.push({
+        code: sealFlow.missing ? "seal_missing" : "seal_mismatch",
+        detail: sealFlow.missing
+          ? "No seal on a trailer that has an expected seal."
+          : `Seal ${input.sealNumber?.trim() || "(blank)"} does not match the expected seal.`,
+      });
+    }
+    if (sealFlow.hold) {
+      flags.push({
+        code: "hold",
+        detail: input.sealReason?.trim() || "Seal hold",
       });
     }
     if (isReefer && placement.kind === "door" && placement.doorType === "dry") {
@@ -150,8 +232,6 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
       await upsertTractor(tx, site.companyId, input.tractorNumber.trim(), scac);
     }
 
-    const matched = match.appointment;
-    const appointment = matched ? (expected.find((row) => row.id === matched.id) ?? null) : null;
     const plannedAt = appointment ? asIso(appointment.planned_at) : null;
     const minutesLate =
       plannedAt && new Date(occurredAt).getTime() - new Date(plannedAt).getTime() > 15 * 60_000
@@ -160,13 +240,15 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
 
     const statusKey =
       input.statusKey?.trim() ||
-      (placement.kind === "door"
-        ? loadType === "outbound"
-          ? "loading"
-          : "unloading"
-        : emptyOrLoaded === "empty"
-          ? "empty"
-          : "loaded");
+      (sealFlow.hold && config.snapshot.trailerStatuses.some((status) => status.key === "hold")
+        ? "hold"
+        : placement.kind === "door"
+          ? loadType === "outbound"
+            ? "loading"
+            : "unloading"
+          : emptyOrLoaded === "empty"
+            ? "empty"
+            : "loaded");
 
     const visitId = crypto.randomUUID();
     const handling = placement.kind === "door" ? "live" : "drop";
@@ -203,7 +285,7 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
         isReefer,
         input.setpointF ?? null,
         input.tempF ?? null,
-        input.fuelPct ?? null,
+        fuelPct,
         statusKey,
         placement.kind,
         placement.id,
@@ -212,7 +294,7 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
         JSON.stringify(customFields),
         JSON.stringify(input.photoId ? [input.photoId] : []),
         JSON.stringify(flags),
-        occurredAt,
+        arrivedAt,
         minutesLate,
         plannedAt,
       ],
@@ -258,6 +340,7 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
     events.push(
       createEvent({
         ...base,
+        id: input.eventId?.trim() || undefined,
         eventType: "gate.check_in",
         payload: {
           carrierName,
@@ -271,9 +354,44 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
           matchMethod: match.matchMethod,
           flags: flags.map((flag) => flag.code),
           minutesLate,
+          arrivedAt,
+          checkedInAt: occurredAt,
         },
       }),
     );
+    if (arrivedAt !== occurredAt) {
+      events.push(
+        createEvent({
+          ...base,
+          eventType: "arrival.corrected",
+          occurredAt: arrivedAt,
+          payload: { arrivedAt, checkedInAt: occurredAt, reason: blank(input.arrivalReason) },
+        }),
+      );
+    }
+    if (sealFlow.flag) {
+      events.push(
+        createEvent({
+          ...base,
+          eventType: sealFlow.missing ? "seal.missing" : "seal.mismatch",
+          payload: {
+            expectedSeal,
+            foundSeal: blank(input.sealNumber),
+            decision: input.sealDecision ?? null,
+            reason: blank(input.sealReason),
+          },
+        }),
+      );
+    }
+    if (sealFlow.hold) {
+      events.push(
+        createEvent({
+          ...base,
+          eventType: "hold.placed",
+          payload: { reason: blank(input.sealReason), locationId: placement.id },
+        }),
+      );
+    }
     events.push(
       createEvent({
         ...base,
@@ -298,7 +416,9 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
           payload: {
             setpointF: input.setpointF ?? null,
             tempF: input.tempF ?? null,
-            fuelPct: input.fuelPct ?? null,
+            fuelPct,
+            fuelLevel: input.fuelLevel ?? null,
+            unitRunning: input.unitRunning ?? null,
           },
         }),
       );
@@ -307,7 +427,13 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
           createEvent({
             ...base,
             eventType: "reefer.alert",
-            payload: { reasons: alerts.reasons, tempOutOfRange: alerts.tempOutOfRange, fuelLow: alerts.fuelLow },
+            payload: {
+              reasons: alerts.reasons,
+              tempOutOfRange: alerts.tempOutOfRange,
+              fuelLow: alerts.fuelLow,
+              unitOff: alerts.unitOff,
+              deltaF: alerts.deltaF,
+            },
           }),
         );
       }
@@ -322,8 +448,27 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
       );
     }
 
-    for (const event of events) await insertEvent(tx, event);
-    return { visitId, events, flags, notice: match.idMismatch ? match.reasons.join(" ") : null };
+    const meta = {
+      configVersion: config.version,
+      commandId,
+      deviceId: blank(input.deviceId),
+      deviceTime: blank(input.deviceTime),
+      serverTime: occurredAt,
+    };
+    const stamped = events.map((event) =>
+      createEvent({
+        ...event,
+        payload: { ...event.payload, ...meta },
+      }),
+    );
+    for (const event of stamped) await insertEvent(tx, event);
+    const notice = sealFlow.flag
+      ? flags.find((flag) => flag.code === "seal_mismatch" || flag.code === "seal_missing" || flag.code === "hold")
+          ?.detail ?? null
+      : match.idMismatch
+        ? match.reasons.join(" ")
+        : null;
+    return { visitId, events: stamped, flags, notice };
   });
 }
 
@@ -334,6 +479,9 @@ export async function performCheckOut(
     sealOut?: string | null;
     occurredAt?: string | Date;
     source: EventSource;
+    commandId?: string | null;
+    role?: string | null;
+    confirmed?: boolean;
   },
 ): Promise<OperationResult> {
   return db.transaction(async (tx) => {
@@ -342,7 +490,11 @@ export async function performCheckOut(
     const occurredAt = input.occurredAt ? new Date(input.occurredAt).toISOString() : clock.asOf;
     const visit = await requireVisit(tx, site.id, input.visitId);
     if (visit.checked_out_at) {
-      return { visitId: visit.id, events: [], flags: [], notice: "Already checked out" };
+      return { visitId: visit.id, events: [], flags: [], notice: "Already checked out", duplicate: true };
+    }
+    const openFlags = parseFlags(visit.flags);
+    if (input.role === "gate" && openFlags.some((flag) => flag.code === "hold")) {
+      throw new YardError("A hold is open. An office role has to release it before check-out.", 403);
     }
     const seals = checkSeals(visit.seal_in, input.sealOut);
     const flags = parseFlags(visit.flags);
@@ -538,6 +690,61 @@ export async function markNoShow(
   });
 }
 
+export async function clearReeferFlag(
+  db: Database,
+  input: {
+    visitId: string;
+    role: string;
+    reason: string;
+    commandId?: string | null;
+    occurredAt?: string | Date;
+    source: EventSource;
+  },
+): Promise<OperationResult> {
+  return db.transaction(async (tx) => {
+    const site = await requireSite(tx);
+    const config = await loadConfig(tx, site);
+    const clock = await readClock(tx, site.id);
+    const occurredAt = input.occurredAt ? new Date(input.occurredAt).toISOString() : clock.asOf;
+    const commandId = blank(input.commandId);
+    if (commandId) {
+      const prior = await tx.query<{ visit_id: string | null }>(
+        `select visit_id from events
+         where event_type = 'reefer.cleared' and payload->>'commandId' = $1
+         limit 1`,
+        [commandId],
+      );
+      if (prior[0]) {
+        return { visitId: prior[0].visit_id, events: [], flags: [], notice: "Already saved", duplicate: true };
+      }
+    }
+    if (!canClearTemp(input.role, config.snapshot.policies.clearTempRoles)) {
+      throw new YardError("A gate role cannot clear a TEMP flag", 403);
+    }
+    if (!input.reason?.trim()) throw new YardError("Clearing a TEMP flag needs a reason");
+    const visit = await requireVisit(tx, site.id, input.visitId);
+    const flags = parseFlags(visit.flags);
+    if (!flags.some((flag) => flag.code === "reefer_temp")) {
+      return { visitId: visit.id, events: [], flags, notice: "No TEMP flag is open" };
+    }
+    const next = flags.filter((flag) => flag.code !== "reefer_temp");
+    await tx.query(`update visits set flags = $2::jsonb where id = $1`, [visit.id, JSON.stringify(next)]);
+    const event = createEvent({
+      ...visitBase(site, visit, visit.location_label ?? "Yard", occurredAt, input.source),
+      eventType: "reefer.cleared",
+      payload: {
+        reason: input.reason.trim(),
+        role: input.role,
+        commandId,
+        configVersion: config.version,
+        serverTime: occurredAt,
+      },
+    });
+    await insertEvent(tx, event);
+    return { visitId: visit.id, events: [event], flags: next, notice: null };
+  });
+}
+
 export async function createAppointment(
   db: Database,
   input: {
@@ -552,6 +759,7 @@ export async function createAppointment(
     emptyOrLoaded: string;
     isReefer: boolean;
     setpointF?: number | null;
+    expectedSeal?: string | null;
     plannedAt: string;
     occurredAt: string;
     source: EventSource;
@@ -578,8 +786,8 @@ export async function createAppointment(
       `insert into appointments (
          id, site_id, company_id, appointment_code, load_id, carrier_name, scac,
          trailer_number, trailer_id, driver_name, tractor_number, load_type,
-         empty_or_loaded, is_reefer, setpoint_f, planned_at, status
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'expected')`,
+         empty_or_loaded, is_reefer, setpoint_f, planned_at, expected_seal, status
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'expected')`,
       [
         id,
         site.id,
@@ -597,6 +805,7 @@ export async function createAppointment(
         input.isReefer,
         input.setpointF ?? null,
         input.plannedAt,
+        blank(input.expectedSeal),
       ],
     );
     await insertEvent(
@@ -907,6 +1116,23 @@ function sanitizeCustom(value: Record<string, unknown> | undefined): Record<stri
     }
   }
   return clean;
+}
+
+function resolveArrivalStamp(
+  occurredAt: string,
+  arrivedAt: string | null | undefined,
+  reason: string | null | undefined,
+): string {
+  if (!arrivedAt) return occurredAt;
+  const stamp = new Date(arrivedAt);
+  if (Number.isNaN(stamp.getTime())) throw new YardError("Arrival time is not a valid time");
+  const iso = stamp.toISOString();
+  const delta = new Date(occurredAt).getTime() - stamp.getTime();
+  if (delta < -60_000) throw new YardError("Arrival time can only be moved earlier");
+  if (delta > 60_000 && !reason?.trim()) {
+    throw new YardError("Moving the arrival time earlier needs a reason");
+  }
+  return iso;
 }
 
 function blank(value: string | null | undefined): string | null {

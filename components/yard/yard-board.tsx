@@ -1,17 +1,19 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { statusColor, statusLabel } from "@/lib/domain/config";
+import { statusLabel } from "@/lib/domain/config";
 import { dwellMinutes, formatDwell } from "@/lib/domain/dwell";
-import { spotTypeLabel, flagLabel } from "@/components/labels";
-import { StatusPill } from "@/components/status-pill";
+import { spotTypeLabel } from "@/components/labels";
+import { dwellFlag, FlagChip, orderedFlags, StateChip } from "@/components/status-chip";
+import { useSync } from "@/components/sync/sync-provider";
 import { Button } from "@/components/ui/button";
 import { useYard } from "@/components/yard-provider";
 import type { VisitView } from "@/lib/yard/state";
 import { cn } from "cn";
 
 export function YardBoard() {
-  const { state, asOf, loading } = useYard();
+  const { state, asOf, loading, refresh } = useYard();
+  const sync = useSync();
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [reeferOnly, setReeferOnly] = useState(false);
@@ -30,7 +32,14 @@ export function YardBoard() {
       if (reeferOnly && !visit.isReefer) return false;
       if (alertsOnly && visit.flags.length === 0) return false;
       if (!needle) return true;
-      const hay = [visit.trailerNumber, visit.scac, visit.carrierName, visit.loadId, visit.appointmentCode]
+      const hay = [
+        visit.trailerNumber,
+        visit.scac,
+        visit.carrierName,
+        visit.loadId,
+        visit.appointmentCode,
+        visit.locationLabel,
+      ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -52,8 +61,24 @@ export function YardBoard() {
     (visit) => visit.locationKind === "spot" && !knownSpots.has(visit.locationId ?? ""),
   );
 
+  const policies = snapshot.policies;
+  const numbered = policies?.spotsNumbered !== false;
+
+  async function clearTemp(id: string) {
+    const role = window.localStorage.getItem("yardline.role") ?? "gate";
+    const reason = window.prompt("Reason for clearing the TEMP flag");
+    if (!reason?.trim()) return;
+    try {
+      await sync.enqueue("clear_flag", { visitId: id, role, reason: reason.trim() });
+      await sync.flush();
+      await refresh();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not clear the flag");
+    }
+  }
+
   return (
-    <div className={cn("flex flex-col gap-5", large && "text-lg")}>
+    <div data-screen="yard" className={cn("flex flex-col gap-5", large && "text-lg")}>
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Yard</h1>
@@ -62,31 +87,33 @@ export function YardBoard() {
             {state.counts.expected} expected
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant={view === "map" ? "default" : "outline"} className="h-11" onClick={() => setView("map")}>
+        <div className="flex gap-4">
+          <Button variant={view === "map" ? "default" : "outline"} data-touch className="min-h-touch-field" onClick={() => setView("map")}>
             Map
           </Button>
-          <Button variant={view === "list" ? "default" : "outline"} className="h-11" onClick={() => setView("list")}>
+          <Button variant={view === "list" ? "default" : "outline"} data-touch className="min-h-touch-field" onClick={() => setView("list")}>
             List
           </Button>
-          <Button variant={large ? "default" : "outline"} className="h-11" onClick={() => setLarge((value) => !value)}>
+          <Button variant={large ? "default" : "outline"} data-touch className="min-h-touch-field" onClick={() => setLarge((value) => !value)}>
             Large type
           </Button>
         </div>
       </div>
 
-      <div className="grid gap-2 md:grid-cols-[1fr_auto_auto_auto]">
+      <div className="grid gap-4 md:grid-cols-[1fr_auto_auto_auto]">
         <input
+          data-touch
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Trailer, SCAC, carrier, load"
-          className="h-12 rounded-lg border border-input bg-card px-3 text-base"
+          placeholder="Trailer, SCAC, carrier, spot"
+          className="min-h-touch-field rounded-card border-2 border-line bg-white px-3 text-fl-body"
           aria-label="Filter trailers"
         />
         <select
           value={status}
           onChange={(event) => setStatus(event.target.value)}
-          className="h-12 rounded-lg border border-input bg-card px-3 text-base"
+          data-touch
+          className="min-h-touch-field rounded-card border-2 border-line bg-white px-3 text-fl-body"
           aria-label="Status"
         >
           <option value="all">All statuses</option>
@@ -100,9 +127,9 @@ export function YardBoard() {
         <FilterToggle label="Alerts" pressed={alertsOnly} onClick={() => setAlertsOnly((value) => !value)} />
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-4">
         {snapshot.trailerStatuses.map((item) => (
-          <StatusPill key={item.key} label={item.label} color={item.color} />
+          <StateChip key={item.key} statusKey={item.key} label={item.label} color={item.color} />
         ))}
       </div>
 
@@ -114,12 +141,18 @@ export function YardBoard() {
 
       {view === "list" ? (
         <VisitTable
-          visits={filtered}
+          visits={[...filtered].sort(
+            (a, b) => dwellMinutes(b.checkedInAt, clock) - dwellMinutes(a.checkedInAt, clock),
+          )}
           clock={clock}
           statuses={snapshot.trailerStatuses}
+          freeTime={policies?.freeTimeMinutes ?? 0}
+          warnBefore={policies?.warnBeforeMinutes ?? 0}
+          onClear={(id) => void clearTemp(id)}
         />
       ) : (
         <div className="flex flex-col gap-6">
+          <DoorStrip doors={snapshot.doors} visits={onSite} />
           {snapshot.zones
             .slice()
             .sort((a, b) => a.sort - b.sort)
@@ -152,13 +185,15 @@ export function YardBoard() {
                         return (
                           <SpotCell
                             key={spot.id}
-                            name={spot.name}
+                            name={numbered ? spot.name : spotTypeLabel(spot.type)}
                             typeLabel={spotTypeLabel(spot.type)}
                             visit={shown ? visit : null}
                             dimmed={Boolean(visit) && !shown}
                             clock={clock}
                             statuses={snapshot.trailerStatuses}
                             closed={spot.type === "out_of_service"}
+                            freeTime={policies?.freeTimeMinutes ?? 0}
+                            warnBefore={policies?.warnBeforeMinutes ?? 0}
                           />
                         );
                       })}
@@ -173,7 +208,14 @@ export function YardBoard() {
               <p className="mb-2 text-sm text-muted-foreground">
                 These trailers sit on spots the current config no longer has.
               </p>
-              <VisitTable visits={unplaced.filter((visit) => visible.has(visit.id))} clock={clock} statuses={snapshot.trailerStatuses} />
+              <VisitTable
+                visits={unplaced.filter((visit) => visible.has(visit.id))}
+                clock={clock}
+                statuses={snapshot.trailerStatuses}
+                freeTime={policies?.freeTimeMinutes ?? 0}
+                warnBefore={policies?.warnBeforeMinutes ?? 0}
+                onClear={(id) => void clearTemp(id)}
+              />
             </section>
           ) : null}
         </div>
@@ -194,15 +236,45 @@ function FilterToggle({
   return (
     <button
       type="button"
+      data-touch
       aria-pressed={pressed}
       onClick={onClick}
       className={cn(
-        "h-12 rounded-lg border px-4 text-sm font-semibold",
+        "min-h-touch-field rounded-card border-2 px-4 text-fl-label",
         pressed ? "border-primary bg-primary text-primary-foreground" : "border-input bg-card",
       )}
     >
       {label}
     </button>
+  );
+}
+
+function DoorStrip({
+  doors,
+  visits,
+}: {
+  doors: { id: string; name: string; type: string; sort: number }[];
+  visits: VisitView[];
+}) {
+  const byDoor = new Map(visits.filter((visit) => visit.locationKind === "door").map((visit) => [visit.locationId, visit]));
+  return (
+    <section>
+      <h2 className="mb-2 text-lg font-semibold">Doors</h2>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5 lg:grid-cols-10">
+        {doors
+          .slice()
+          .sort((a, b) => a.sort - b.sort)
+          .map((door) => {
+            const visit = byDoor.get(door.id);
+            return (
+              <article key={door.id} className={cn("rounded-card border-2 p-2", visit ? "border-teal-700 bg-teal-50" : "border-dashed border-line")}>
+                <p className="font-id text-sm font-bold">{door.name}</p>
+                {visit ? <p className="font-id text-base font-semibold">{visit.trailerNumber}</p> : <p className="text-sm text-ink-muted">Open</p>}
+              </article>
+            );
+          })}
+      </div>
+    </section>
   );
 }
 
@@ -214,6 +286,8 @@ function SpotCell({
   clock,
   statuses,
   closed,
+  freeTime,
+  warnBefore,
 }: {
   name: string;
   typeLabel: string;
@@ -222,42 +296,45 @@ function SpotCell({
   clock: string;
   statuses: { key: string; label: string; color: string }[];
   closed: boolean;
+  freeTime: number;
+  warnBefore: number;
 }) {
   const alert = Boolean(visit && visit.flags.length > 0);
+  const minutes = visit ? dwellMinutes(visit.checkedInAt, clock) : 0;
+  const dwell = visit ? dwellFlag(minutes, freeTime, warnBefore) : null;
+  const flags = visit ? orderedFlags(dwell ? [...visit.flags, dwell] : visit.flags) : [];
   return (
     <article
       className={cn(
-        "flex min-h-36 flex-col gap-1 rounded-lg border-2 bg-card p-2.5",
-        closed && "border-dashed bg-muted text-muted-foreground",
-        visit ? "border-foreground/15" : "border-dashed border-border",
-        alert && "border-destructive",
+        "flex min-h-36 flex-col gap-1 rounded-card border-2 bg-white p-2.5",
+        closed && "border-dashed bg-slate-100 text-ink-muted",
+        visit ? "border-slate-700" : "border-dashed border-line",
+        alert && "border-red-800",
         dimmed && "opacity-35",
       )}
     >
-      <div className="flex items-center justify-between gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
-        <span className="equip text-xs font-semibold text-foreground">{name}</span>
+      <div className="flex items-center justify-between gap-2 text-xs uppercase tracking-wide text-ink-muted">
+        <span className="font-id text-sm font-semibold text-slate-950">{name}</span>
         <span>{typeLabel}</span>
       </div>
       {visit ? (
         <>
-          <p className="equip text-lg font-semibold leading-tight">{visit.trailerNumber}</p>
-          <p className="truncate text-xs">
+          <p className="font-id text-xl font-semibold leading-tight">{visit.trailerNumber}</p>
+          <p className="truncate text-sm">
             {visit.scac} · {visit.carrierName}
           </p>
-          <StatusPill label={statusLabel(statuses, visit.statusKey)} color={statusColor(statuses, visit.statusKey)} />
-          <p className="mt-auto text-xs">
-            {formatDwell(dwellMinutes(visit.checkedInAt, clock))}
-            {visit.minutesLate ? ` · late ${visit.minutesLate}m` : ""}
-            {visit.isReefer && visit.tempF != null ? ` · ${visit.tempF}°F` : ""}
-          </p>
-          {visit.flags.length > 0 ? (
-            <p className="text-xs font-semibold text-destructive">
-              {visit.flags.map((flag) => flagLabel(flag.code)).join(" · ")}
-            </p>
+          <StateChip statusKey={visit.statusKey} label={statusLabel(statuses, visit.statusKey)} />
+          <p className="mt-auto font-id text-sm">{formatDwell(minutes)}</p>
+          {flags.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {flags.slice(0, 2).map((flag) => (
+                <FlagChip key={flag.code} code={flag.code} detail={"detail" in flag ? flag.detail : undefined} />
+              ))}
+            </div>
           ) : null}
         </>
       ) : (
-        <p className="mt-auto text-sm text-muted-foreground">{closed ? "Closed" : "Open"}</p>
+        <p className="mt-auto text-sm text-ink-muted">{closed ? "Closed" : "Open"}</p>
       )}
     </article>
   );
@@ -267,10 +344,16 @@ function VisitTable({
   visits,
   clock,
   statuses,
+  freeTime,
+  warnBefore,
+  onClear,
 }: {
   visits: VisitView[];
   clock: string;
   statuses: { key: string; label: string; color: string }[];
+  freeTime: number;
+  warnBefore: number;
+  onClear: (visitId: string) => void;
 }) {
   if (visits.length === 0) {
     return <p className="text-sm text-muted-foreground">Nothing matches those filters.</p>;
@@ -301,14 +384,24 @@ function VisitTable({
               </td>
               <td className="px-3 py-3">{visit.locationLabel}</td>
               <td className="px-3 py-3">
-                <StatusPill
-                  label={statusLabel(statuses, visit.statusKey)}
-                  color={statusColor(statuses, visit.statusKey)}
-                />
+                <StateChip statusKey={visit.statusKey} label={statusLabel(statuses, visit.statusKey)} />
               </td>
-              <td className="equip px-3 py-3">{formatDwell(dwellMinutes(visit.checkedInAt, clock))}</td>
-              <td className="px-3 py-3 text-destructive">
-                {visit.flags.map((flag) => flagLabel(flag.code)).join(", ")}
+              <td className="font-id px-3 py-3">{formatDwell(dwellMinutes(visit.checkedInAt, clock))}</td>
+              <td className="px-3 py-3">
+                <div className="flex flex-wrap gap-1">
+                  {orderedFlags(
+                    dwellFlag(dwellMinutes(visit.checkedInAt, clock), freeTime, warnBefore)
+                      ? [...visit.flags, dwellFlag(dwellMinutes(visit.checkedInAt, clock), freeTime, warnBefore)!]
+                      : visit.flags,
+                  ).map((flag) => (
+                    <FlagChip key={flag.code} code={flag.code} detail={flag.detail} />
+                  ))}
+                  {visit.flags.some((flag) => flag.code === "reefer_temp") ? (
+                    <button type="button" data-touch className="min-h-touch-min rounded-card border-2 border-slate-950 px-2 text-sm" onClick={() => onClear(visit.id)}>
+                      Clear TEMP
+                    </button>
+                  ) : null}
+                </div>
               </td>
             </tr>
           ))}

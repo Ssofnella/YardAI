@@ -4,7 +4,7 @@ import { openPglite } from "@/lib/db/pglite";
 import type { Database } from "@/lib/db/types";
 import { seedDemo } from "@/lib/seed/demo";
 import { insertEvent } from "@/lib/yard/event-store";
-import { performCheckIn, performCheckOut } from "@/lib/yard/operations";
+import { clearReeferFlag, performCheckIn, performCheckOut } from "@/lib/yard/operations";
 import { createEvent } from "@/lib/domain/events";
 
 let db: Database;
@@ -74,5 +74,74 @@ describe("yard database", () => {
     await expect(db.query(`delete from events where id = $1`, [mismatch!.id])).rejects.toThrow(
       /append-only/,
     );
+  });
+
+  it("holds a bad seal, ignores a repeated command, and blocks a gate role from clearing TEMP", async () => {
+    const commandId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const held = await performCheckIn(db, {
+      commandId,
+      eventId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      trailerNumber: "HL-44121",
+      scac: "HRBR",
+      carrierName: "Harborlight Freight",
+      sealNumber: "SL-99999",
+      sealDecision: "hold",
+      sealReason: "Number mismatch",
+      loadType: "inbound",
+      emptyOrLoaded: "loaded",
+      appointmentId: "APT-2401",
+      source: "manual",
+      arrivedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      arrivalReason: "Queue",
+    });
+    expect(held.flags.map((flag) => flag.code)).toEqual(expect.arrayContaining(["seal_mismatch", "hold"]));
+    expect(held.events.some((event) => event.eventType === "hold.placed")).toBe(true);
+    expect(held.events.some((event) => event.eventType === "seal.mismatch")).toBe(true);
+    expect(held.events.find((event) => event.eventType === "gate.check_in")?.id).toBe(
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    );
+    expect(held.events[0]?.payload.configVersion).toBe(1);
+    expect(held.events[0]?.location).toMatch(/H0/);
+
+    const replay = await performCheckIn(db, {
+      commandId,
+      trailerNumber: "HL-44121",
+      scac: "HRBR",
+      sealNumber: "SL-99999",
+      sealDecision: "hold",
+      sealReason: "Number mismatch",
+      source: "manual",
+    });
+    expect(replay.duplicate).toBe(true);
+    expect(replay.events).toHaveLength(0);
+
+    const hot = await performCheckIn(db, {
+      trailerNumber: "PKC-2204",
+      scac: "PNCN",
+      carrierName: "Pinecone Logistics",
+      isReefer: true,
+      setpointF: 34,
+      tempF: 40,
+      fuelLevel: "1/4",
+      unitRunning: true,
+      sealNumber: "SL-24021",
+      loadType: "inbound",
+      emptyOrLoaded: "loaded",
+      appointmentId: "APT-2402",
+      preferredPlace: "R02",
+      source: "manual",
+    });
+    expect(hot.flags.map((flag) => flag.code)).toContain("reefer_temp");
+    await expect(
+      clearReeferFlag(db, { visitId: hot.visitId!, role: "gate", reason: "Looks fine", source: "manual" }),
+    ).rejects.toThrow(/cannot clear/);
+    const cleared = await clearReeferFlag(db, {
+      visitId: hot.visitId!,
+      role: "office",
+      reason: "Product was still frozen",
+      source: "manual",
+    });
+    expect(cleared.events[0]?.eventType).toBe("reefer.cleared");
+    expect(cleared.flags.some((flag) => flag.code === "reefer_temp")).toBe(false);
   });
 });

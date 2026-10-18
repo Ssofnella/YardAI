@@ -1,6 +1,7 @@
 export function spotTypeLabel(type: string): string {
   if (type === "reefer") return "Reefer plug";
   if (type === "staging") return "Staging";
+  if (type === "holding") return "Holding";
   if (type === "out_of_service") return "Out of service";
   return "Dry";
 }
@@ -15,8 +16,11 @@ export function flagLabel(code: string): string {
   const labels: Record<string, string> = {
     id_mismatch: "ID mismatch",
     seal_mismatch: "Seal mismatch",
+    seal_missing: "No seal",
+    hold: "Hold",
     reefer_temp: "Temp",
     reefer_fuel: "Fuel",
+    reefer_unit: "Unit off",
     door_not_reefer: "Dry door",
   };
   return labels[code] ?? code;

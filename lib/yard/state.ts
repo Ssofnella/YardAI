@@ -51,6 +51,7 @@ export type AppointmentView = {
   emptyOrLoaded: string;
   isReefer: boolean;
   setpointF: number | null;
+  expectedSeal: string | null;
   plannedAt: string;
   status: string;
 };
@@ -207,6 +208,7 @@ function mapAppointment(row: Record<string, unknown>): AppointmentView {
     emptyOrLoaded: String(row.empty_or_loaded),
     isReefer: Boolean(row.is_reefer),
     setpointF: asNumber(row.setpoint_f),
+    expectedSeal: asText(row.expected_seal),
     plannedAt: asIso(row.planned_at) ?? "",
     status: String(row.status),
   };

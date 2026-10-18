@@ -1,7 +1,42 @@
 import type { ReeferLimits } from "@/lib/domain/reefer";
 
 export type DoorType = "dry" | "reefer" | "both";
-export type SpotType = "dry" | "reefer" | "staging" | "out_of_service";
+export type SpotType = "dry" | "reefer" | "staging" | "holding" | "out_of_service";
+export type FuelMark = "E" | "1/4" | "1/2" | "3/4" | "F";
+export type DeviceType = "ipad_landscape" | "ipad_portrait" | "phone" | "android_tablet";
+export type SealMismatchPolicy = "hold" | "allow_with_reason" | "note";
+export type YardRole = "admin" | "office" | "gate";
+
+/** Open decisions Allen has not locked. Each one is a published setting. */
+export type SitePolicies = {
+  deviceType: DeviceType;
+  locale: "en" | "es";
+  spotsNumbered: boolean;
+  gateCount: 1 | 2;
+  sealMismatchPolicy: SealMismatchPolicy;
+  blindSealEntry: boolean;
+  clearTempRoles: YardRole[];
+  graceMinutes: number;
+  freeTimeMinutes: number;
+  warnBeforeMinutes: number;
+  lowFuelAtOrBelow: FuelMark;
+};
+
+export function defaultPolicies(): SitePolicies {
+  return {
+    deviceType: "ipad_landscape",
+    locale: "en",
+    spotsNumbered: true,
+    gateCount: 1,
+    sealMismatchPolicy: "allow_with_reason",
+    blindSealEntry: true,
+    clearTempRoles: ["admin", "office"],
+    graceMinutes: 30,
+    freeTimeMinutes: 120,
+    warnBeforeMinutes: 30,
+    lowFuelAtOrBelow: "1/4",
+  };
+}
 export type FieldType = "text" | "number" | "photo" | "checkbox" | "dropdown" | "signature";
 
 export type DoorDef = {
@@ -65,6 +100,7 @@ export type SiteConfigSnapshot = {
   checkInFields: CheckInField[];
   loadTypes: LoadTypeDef[];
   reefer: ReeferLimits;
+  policies: SitePolicies;
 };
 
 export class ConfigError extends Error {
@@ -75,7 +111,11 @@ export class ConfigError extends Error {
 }
 
 const DOOR_TYPES = new Set<DoorType>(["dry", "reefer", "both"]);
-const SPOT_TYPES = new Set<SpotType>(["dry", "reefer", "staging", "out_of_service"]);
+const SPOT_TYPES = new Set<SpotType>(["dry", "reefer", "staging", "holding", "out_of_service"]);
+const FUEL_MARKS = new Set<FuelMark>(["E", "1/4", "1/2", "3/4", "F"]);
+const DEVICE_TYPES = new Set<DeviceType>(["ipad_landscape", "ipad_portrait", "phone", "android_tablet"]);
+const SEAL_POLICIES = new Set<SealMismatchPolicy>(["hold", "allow_with_reason", "note"]);
+const YARD_ROLES = new Set<YardRole>(["admin", "office", "gate"]);
 const FIELD_TYPES = new Set<FieldType>([
   "text",
   "number",
@@ -125,7 +165,7 @@ function spotRow(
 export function defaultSnapshot(): SiteConfigSnapshot {
   const doors: DoorDef[] = [];
   for (let n = 1; n <= 20; n += 1) {
-    doors.push(door(n, n >= 17 ? "both" : "dry"));
+    doors.push(door(n, n <= 6 ? "both" : "dry"));
   }
   return {
     companyName: "Lakeshore Provisions",
@@ -137,12 +177,14 @@ export function defaultSnapshot(): SiteConfigSnapshot {
       { id: "zone-a", name: "Drop lot A", sort: 2 },
       { id: "zone-b", name: "Drop lot B", sort: 3 },
       { id: "zone-staging", name: "Staging", sort: 4 },
+      { id: "zone-holding", name: "Holding", sort: 5 },
     ],
     spots: [
       ...spotRow("zone-reefer", "R", 10, "reefer", 5),
       ...spotRow("zone-a", "A", 16, "dry"),
       ...spotRow("zone-b", "B", 8, "dry"),
       ...spotRow("zone-staging", "S", 4, "staging", 4),
+      ...spotRow("zone-holding", "H", 4, "holding", 4),
     ],
     trailerStatuses: [
       { id: "st-empty", key: "empty", label: "Empty", color: "#047857", sort: 1, system: true },
@@ -186,6 +228,7 @@ export function defaultSnapshot(): SiteConfigSnapshot {
       { value: "transfer", label: "Transfer" },
     ],
     reefer: { tempToleranceF: 5, minFuelPct: 25 },
+    policies: defaultPolicies(),
   };
 }
 
@@ -291,6 +334,7 @@ export function validateSnapshot(input: SiteConfigSnapshot): SiteConfigSnapshot 
     throw new ConfigError("Reefer fuel floor must be between 0 and 100%");
   }
   snapshot.reefer = { tempToleranceF: tolerance, minFuelPct: fuel };
+  snapshot.policies = normalizePolicies(snapshot.policies);
   snapshot.siteName = snapshot.siteName.trim();
   snapshot.companyName = snapshot.companyName.trim();
   return snapshot;
@@ -321,6 +365,42 @@ function assertUnique(values: string[], label: string) {
     if (seen.has(value)) throw new ConfigError(`Duplicate ${label}: ${value}`);
     seen.add(value);
   }
+}
+
+export function normalizePolicies(input: Partial<SitePolicies> | null | undefined): SitePolicies {
+  const base = defaultPolicies();
+  const source = input ?? {};
+  const roles = Array.isArray(source.clearTempRoles)
+    ? source.clearTempRoles.filter((role): role is YardRole => YARD_ROLES.has(role as YardRole))
+    : base.clearTempRoles;
+  const grace = clampNumber(source.graceMinutes, base.graceMinutes, 0, 240);
+  const freeTime = clampNumber(source.freeTimeMinutes, base.freeTimeMinutes, 0, 1440);
+  const warn = clampNumber(source.warnBeforeMinutes, base.warnBeforeMinutes, 0, freeTime || 1440);
+  return {
+    deviceType: DEVICE_TYPES.has(source.deviceType as DeviceType)
+      ? (source.deviceType as DeviceType)
+      : base.deviceType,
+    locale: source.locale === "es" ? "es" : "en",
+    spotsNumbered: source.spotsNumbered !== false,
+    gateCount: source.gateCount === 2 ? 2 : 1,
+    sealMismatchPolicy: SEAL_POLICIES.has(source.sealMismatchPolicy as SealMismatchPolicy)
+      ? (source.sealMismatchPolicy as SealMismatchPolicy)
+      : base.sealMismatchPolicy,
+    blindSealEntry: source.blindSealEntry !== false,
+    clearTempRoles: roles.length ? roles : base.clearTempRoles,
+    graceMinutes: grace,
+    freeTimeMinutes: freeTime,
+    warnBeforeMinutes: warn,
+    lowFuelAtOrBelow: FUEL_MARKS.has(source.lowFuelAtOrBelow as FuelMark)
+      ? (source.lowFuelAtOrBelow as FuelMark)
+      : base.lowFuelAtOrBelow,
+  };
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
 }
 
 export function statusLabel(statuses: { key: string; label: string }[], key: string): string {

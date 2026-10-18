@@ -89,8 +89,8 @@ Timestamps are stored in UTC. Boards and the log format them in the site timezon
 - A reefer on a dry door is allowed and flagged. It is not rejected.
 - Photos are stored as bytea on `photos`, not in object storage.
 - A signature field is a drawing stored as a PNG data URL on the visit. It is not a legally meaningful signature.
-- The service worker makes the app installable. It does not queue gate actions offline.
-- Default vocabulary is English. Status labels can be renamed in the wizard; the app is not translated.
+- The service worker caches the app shell for a reload with no network. Gate writes go to an IndexedDB outbox first and flush when the tablet is online. API calls are not cached.
+- Frontline copy goes through `t()` in `lib/i18n.ts`. Only the English catalog is filled in. The site locale can be set to Spanish in the wizard, and it falls back to English until those keys exist.
 - SCAC codes in the demo (`HRBR`, `PNCN`, `RDKT`, `MNPR`, `CNDR`) are invented.
 
 ## Open decisions for Allen
@@ -99,9 +99,9 @@ Timestamps are stored in UTC. Boards and the log format them in the site timezon
 2. **Realtime on Supabase.** The demo uses server-sent events from the Next server. Supabase Realtime on `events` is the production option if the browser should subscribe directly. That wants a user JWT and the RLS policies, not the owner connection.
 3. **Detention.** Dwell is visible. Free-time rules and an evidence export are not. `detention_terms` is empty. Confirm whether the first pilot is a receiver (dwell is a service story) or a shipper/3PL (dwell is a billing story).
 4. **Door rules.** Should a reefer be blocked from a dry door, or only flagged? Should empty trailers prefer the back row automatically?
-5. **Offline.** Yards have dead zones. An IndexedDB outbox with idempotent event ids is the next step if a pilot tablet drops Wi-Fi. This slice only installs as a PWA.
-6. **Photos.** Bytea is fine for a demo. A pilot with a photo on every truck should move to Supabase Storage.
-7. **Language.** Spanish for the gate is a likely pilot need and is not built.
+5. **Offline conflicts.** The gate queues check-ins and flushes them by client id (`ON CONFLICT DO NOTHING` plus a command id). Two tablets assigning the same spot while offline still need an office conflict screen. This slice rejects the second write or flags it; it does not yet open a review queue in the UI beyond "needs review" on the sync pill.
+6. **Photos.** Bytea is fine for a demo. A pilot with a photo on every truck should move to Supabase Storage. The gate photo control from the spec is not on the check-in form yet.
+7. **Language.** Strings are extracted. Spanish copy is not written. Confirm whether the first pilot needs `es` on the gate tablet.
 8. **Employment.** The research note still stands: check the Valent agreement before a public pilot or a post that looks like a company product. This repo is set up as your personal project.
 
 ## Deploy to Vercel and Supabase
@@ -126,6 +126,29 @@ Notes:
 - `npm run build` must succeed locally before you rely on the Vercel build. This repo builds with `next build`.
 - After a schema change, delete `.data` locally. On Supabase, write a new migration. Do not edit `0001` in place once it has been applied.
 
+## UX spec (18 Oct 2026)
+
+Implemented in this pass:
+
+- Offline-first gate: IndexedDB outbox, client command ids, duplicate-safe `POST /api/sync`, flush on open, `online`, `visibilitychange`, and a 20s timer. Sync pill is grey for offline and red only for "needs review".
+- Versioned config still drives doors, spots, statuses, and fields. New settings on the Rules step: device type (default iPad landscape), seal mismatch policy, who can clear a TEMP flag, temperature tolerance, low-fuel mark, free time, numbered spots, one gate or two, and locale.
+- New arrival stamps the time before the form. Search of two or more characters pre-fills an expected arrival. Edits can only move that time earlier, with a reason.
+- Blind seal entry. A mismatch shows both numbers with differing digits boxed and underlined, then Re-enter, Hold, or Accept with a required reason. Hold writes `seal.mismatch` and `hold.placed`, sets a HOLD flag, and suggests a holding spot. A gate role cannot check out a hold.
+- Reefer mini-form: unit running, set point and display steppers, fuel marks E through F. Out of range raises TEMP, FUEL, or UNIT OFF with icon and text. Office or admin can clear TEMP with a reason (`reefer.cleared`). Gate cannot.
+- Touch sizes 96 / 64 / 48. `npm run test:touch` checks frontline routes at 1180×820.
+- Light high-contrast theme. Status and flag chips always pair an icon with a word.
+
+Deferred from the same spec:
+
+- Full Spanish catalog and a test that fails on missing `es` keys.
+- Camera capture, client photo compression, and barcode scan.
+- Dark theme toggle.
+- Long-press move on the yard map, full-screen trailer detail, and two-tablet realtime conflict UI.
+- One-tap door events (`load_start`, `load_end`) and free-time copy on every door tile.
+- Kiosk mode, PIN users, per-carrier free time, and spot-assignment rule rows.
+- Confirm-sheet reason chips for every override, and an offline draft older than 12 hours auto-discard.
+- axe contrast run and a grayscale snapshot test. Chips are built so a grayscale review can still read the word and the icon.
+
 ## Tests
 
 `npm test` covers:
@@ -137,6 +160,9 @@ Notes:
 - The published default yard (20 doors) and a config that tries to hide the trailer number.
 - A Postgres check that a mismatched check-in and a mismatched seal are stored, and that `UPDATE` and `DELETE` on `events` throw.
 - A full simulated shift against Postgres: no-shows, door moves, the ID mismatch, the seal mismatch, and the reefer alert.
+- Seal digit compare, hold versus accept, and which roles may clear a TEMP flag.
+- Outbox flush: one row per client id, and a flush that stops halfway does not send the saved row again.
+- `npm run test:touch` (Playwright) checks glove-sized targets on `/`, `/gate`, and `/doors` at 1180×820.
 
 ## Layout
 

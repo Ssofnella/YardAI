@@ -7,8 +7,35 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-instrument), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-ibm), ui-monospace, monospace;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+  --spacing-touch-primary: 96px;
+  --spacing-touch-field: 64px;
+  --spacing-touch-min: 48px;
+  --text-fl-meta: 16px;
+  --text-fl-meta--line-height: 22px;
+  --text-fl-body: 18px;
+  --text-fl-body--line-height: 28px;
+  --text-fl-label: 20px;
+  --text-fl-label--line-height: 28px;
+  --text-fl-title: 28px;
+  --text-fl-title--line-height: 36px;
+  --text-fl-id: 32px;
+  --text-fl-id--line-height: 40px;
+  --text-fl-hero: 48px;
+  --text-fl-hero--line-height: 56px;
+  --text-tv-id: 56px;
+  --text-tv-id--line-height: 64px;
+  --text-tv-label: 32px;
+  --text-tv-label--line-height: 40px;
+  --color-ink: #020617;
+  --color-ink-muted: #334155;
+  --color-line: #64748b;
+  --color-flag-seal: #991b1b;
+  --color-flag-reefer: #1e3a8a;
+  --color-flag-fuel: #fcd34d;
+  --color-flag-hold: #020617;
+  --radius-card: 12px;
   --font-heading: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
@@ -49,24 +76,27 @@
 }
 
 :root {
-  --background: oklch(0.955 0.014 95);
-  --foreground: oklch(0.23 0.02 70);
-  --card: oklch(0.985 0.008 95);
-  --card-foreground: oklch(0.23 0.02 70);
-  --popover: oklch(0.985 0.008 95);
-  --popover-foreground: oklch(0.23 0.02 70);
-  --primary: oklch(0.37 0.055 168);
-  --primary-foreground: oklch(0.97 0.01 95);
-  --secondary: oklch(0.91 0.02 90);
-  --secondary-foreground: oklch(0.28 0.02 70);
-  --muted: oklch(0.92 0.015 90);
-  --muted-foreground: oklch(0.46 0.02 70);
-  --accent: oklch(0.93 0.045 95);
-  --accent-foreground: oklch(0.28 0.03 70);
-  --destructive: oklch(0.5 0.17 28);
-  --border: oklch(0.84 0.02 85);
-  --input: oklch(0.8 0.02 85);
-  --ring: oklch(0.37 0.055 168);
+  --touch-primary: 96px;
+  --touch-field: 64px;
+  --touch-min: 48px;
+  --background: #ffffff;
+  --foreground: #020617;
+  --card: #ffffff;
+  --card-foreground: #020617;
+  --popover: #ffffff;
+  --popover-foreground: #020617;
+  --primary: #1e40af;
+  --primary-foreground: #ffffff;
+  --secondary: #ffffff;
+  --secondary-foreground: #020617;
+  --muted: #f1f5f9;
+  --muted-foreground: #334155;
+  --accent: #f1f5f9;
+  --accent-foreground: #020617;
+  --destructive: #991b1b;
+  --border: #64748b;
+  --input: #64748b;
+  --ring: #fde047;
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
@@ -132,8 +162,36 @@
   }
 }
 
-.equip {
-  font-family: var(--font-ibm), ui-monospace, monospace;
+.equip,
+.font-id {
+  font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
+}
+
+.min-h-touch-primary { min-height: var(--touch-primary); }
+.min-h-touch-field { min-height: var(--touch-field); }
+.min-h-touch-min { min-height: var(--touch-min); }
+.min-w-touch-field { min-width: var(--touch-field); }
+.min-w-touch-min { min-width: var(--touch-min); }
+
+button,
+a,
+input,
+select,
+[role="radio"] {
+  min-width: 48px;
+}
+
+:focus-visible {
+  outline: 3px solid #020617;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px #fde047;
+}
+
+@media (max-width: 640px) {
+  :root { --touch-primary: 112px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin { animation: none; }
 }

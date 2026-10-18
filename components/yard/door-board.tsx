@@ -1,9 +1,9 @@
 "use client";
 
-import { deriveDoorStatus, statusColor, statusLabel } from "@/lib/domain/config";
+import { deriveDoorStatus, statusLabel } from "@/lib/domain/config";
 import { dwellMinutes, formatDwell } from "@/lib/domain/dwell";
-import { doorTypeLabel, flagLabel } from "@/components/labels";
-import { StatusPill } from "@/components/status-pill";
+import { doorTypeLabel } from "@/components/labels";
+import { FlagChip, orderedFlags, StateChip } from "@/components/status-chip";
 import { useYard } from "@/components/yard-provider";
 import { cn } from "cn";
 
@@ -23,7 +23,7 @@ export function DoorBoard() {
   );
 
   return (
-    <div className="flex flex-col gap-5">
+    <div data-screen="doors" className="flex flex-col gap-5">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Doors</h1>
         <p className="text-sm text-muted-foreground">
@@ -55,10 +55,7 @@ export function DoorBoard() {
                       {doorTypeLabel(door.type)}
                     </p>
                   </div>
-                  <StatusPill
-                    label={statusLabel(snapshot.doorStatuses, doorKey)}
-                    color={statusColor(snapshot.doorStatuses, doorKey)}
-                  />
+                  <StateChip statusKey={doorKey} label={statusLabel(snapshot.doorStatuses, doorKey)} />
                 </div>
                 {visit ? (
                   <div className="mt-auto flex flex-col gap-1">
@@ -72,9 +69,11 @@ export function DoorBoard() {
                       {visit.isReefer && visit.tempF != null ? ` · ${visit.tempF}°F` : ""}
                     </p>
                     {visit.flags.length > 0 ? (
-                      <p className="text-sm font-semibold text-destructive">
-                        {visit.flags.map((flag) => flagLabel(flag.code)).join(" · ")}
-                      </p>
+                      <div className="flex flex-wrap gap-1">
+                        {orderedFlags(visit.flags).map((flag) => (
+                          <FlagChip key={flag.code} code={flag.code} detail={flag.detail} />
+                        ))}
+                      </div>
                     ) : null}
                   </div>
                 ) : (

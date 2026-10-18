@@ -85,11 +85,14 @@ create table if not exists appointments (
   is_reefer boolean not null default false,
   setpoint_f double precision,
   planned_at timestamptz not null,
+  expected_seal text,
   status text not null default 'expected',
   created_at timestamptz not null default now(),
   unique (site_id, appointment_code),
   check (status in ('expected', 'arrived', 'no_show', 'cancelled'))
 );
+
+alter table appointments add column if not exists expected_seal text;
 
 create table if not exists visits (
   id uuid primary key,

@@ -20,8 +20,9 @@ async function open(): Promise<Database> {
     ? openPostgres(process.env.DATABASE_URL)
     : await openMemoryOrFile();
   await db.exec(schemaSql());
-  const { seedIfEmpty } = await import("@/lib/seed/demo");
+  const { backfillExpectedSeals, seedIfEmpty } = await import("@/lib/seed/demo");
   await seedIfEmpty(db);
+  await backfillExpectedSeals(db);
   return db;
 }
 

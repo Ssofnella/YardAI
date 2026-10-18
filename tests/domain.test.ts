@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultSnapshot, validateSnapshot } from "@/lib/domain/config";
+import { defaultPolicies, defaultSnapshot, validateSnapshot } from "@/lib/domain/config";
 import { dwellMinutes, formatDwell } from "@/lib/domain/dwell";
 import {
   EventConflictError,
@@ -11,7 +11,8 @@ import {
 } from "@/lib/domain/events";
 import { matchArrival } from "@/lib/domain/matching";
 import { reeferAlerts } from "@/lib/domain/reefer";
-import { checkSeals, normalizeSeal } from "@/lib/domain/seals";
+import { checkSeals, normalizeSeal, sealGlyphs } from "@/lib/domain/seals";
+import { canClearTemp, resolveSealFlow } from "@/lib/domain/seal-flow";
 import { shiftStartUtc, zonedTimeToUtc } from "@/lib/domain/time";
 import { DAY_SCRIPT, buildDayPlan } from "@/lib/simulator/script";
 
@@ -92,6 +93,52 @@ describe("seals", () => {
     expect(checkSeals("", "   ").mismatch).toBe(false);
     expect(checkSeals(null, null).mismatch).toBe(false);
   });
+
+  it("boxes only the digits that differ", () => {
+    const glyphs = sealGlyphs("0045123", "0045132");
+    expect(glyphs.found.map((glyph) => glyph.differs)).toEqual([false, false, false, false, false, true, true]);
+    expect(glyphs.expected[5]?.char).toBe("2");
+    expect(glyphs.found[5]?.char).toBe("3");
+  });
+});
+
+describe("seal decisions and who may clear a temp flag", () => {
+  it("requires a choice and a reason before a mismatch can be accepted", () => {
+    const open = resolveSealFlow({
+      expectedSeal: "SL-44041",
+      foundSeal: "SL-44042",
+      decision: null,
+      reason: null,
+      policy: "allow_with_reason",
+      loaded: true,
+    });
+    expect(open.error).toMatch(/Choose/);
+    const bare = resolveSealFlow({
+      expectedSeal: "SL-44041",
+      foundSeal: "SL-44042",
+      decision: "accept",
+      reason: " ",
+      policy: "allow_with_reason",
+      loaded: true,
+    });
+    expect(bare.error).toMatch(/reason/);
+    const held = resolveSealFlow({
+      expectedSeal: "SL-44041",
+      foundSeal: "SL-44042",
+      decision: "hold",
+      reason: "Number mismatch",
+      policy: "hold",
+      loaded: true,
+    });
+    expect(held.hold).toBe(true);
+    expect(held.error).toBeNull();
+  });
+
+  it("lets office clear a TEMP flag and keeps gate from doing it", () => {
+    const roles = defaultPolicies().clearTempRoles;
+    expect(canClearTemp("gate", roles)).toBe(false);
+    expect(canClearTemp("office", roles)).toBe(true);
+  });
 });
 
 describe("matching", () => {
@@ -164,6 +211,19 @@ describe("reefer alerts and dwell", () => {
     expect(hot.fuelLow).toBe(true);
     const ok = reeferAlerts({ isReefer: true, setpointF: 34, tempF: 36, fuelPct: 40 }, limits);
     expect(ok.outOfRange).toBe(false);
+    const edge = reeferAlerts(
+      { isReefer: true, setpointF: 34, tempF: 38, fuelPct: null, fuelLevel: "1/2", unitRunning: true },
+      { ...limits, lowFuelAtOrBelow: "1/4" },
+    );
+    expect(edge.tempOutOfRange).toBe(false);
+    const over = reeferAlerts(
+      { isReefer: true, setpointF: 34, tempF: 40, fuelPct: null, fuelLevel: "1/4", unitRunning: false },
+      { ...limits, lowFuelAtOrBelow: "1/4" },
+    );
+    expect(over.tempOutOfRange).toBe(true);
+    expect(over.deltaF).toBe(6);
+    expect(over.fuelLow).toBe(true);
+    expect(over.unitOff).toBe(true);
     const dry = reeferAlerts({ isReefer: false, setpointF: null, tempF: 90, fuelPct: 0 }, limits);
     expect(dry.outOfRange).toBe(false);
   });

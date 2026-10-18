@@ -31,3 +31,25 @@ export function checkSeals(
     normalizedOut,
   };
 }
+
+export type SealGlyph = { char: string; differs: boolean };
+
+/** Digit-by-digit compare for the mismatch panel. Differing characters are boxed. */
+export function sealGlyphs(
+  expected: string | null | undefined,
+  found: string | null | undefined,
+): { expected: SealGlyph[]; found: SealGlyph[] } {
+  const left = normalizeSeal(expected);
+  const right = normalizeSeal(found);
+  const length = Math.max(left.length, right.length);
+  const expectedGlyphs: SealGlyph[] = [];
+  const foundGlyphs: SealGlyph[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const a = left[index] ?? "";
+    const b = right[index] ?? "";
+    const differs = a !== b;
+    expectedGlyphs.push({ char: a || "·", differs });
+    foundGlyphs.push({ char: b || "·", differs });
+  }
+  return { expected: expectedGlyphs, found: foundGlyphs };
+}

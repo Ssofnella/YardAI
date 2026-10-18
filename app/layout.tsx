@@ -1,22 +1,11 @@
 import type { Metadata, Viewport } from "next";
-import { IBM_Plex_Mono, Instrument_Sans } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "@/components/ui/sonner";
 import { PwaRegister } from "@/components/pwa-register";
 import { Shell } from "@/components/shell";
+import { SyncProvider } from "@/components/sync/sync-provider";
 import { YardProvider } from "@/components/yard-provider";
 import "./globals.css";
-
-const sans = Instrument_Sans({
-  subsets: ["latin"],
-  variable: "--font-instrument",
-});
-
-const mono = IBM_Plex_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  variable: "--font-ibm",
-});
 
 export const metadata: Metadata = {
   title: {
@@ -35,16 +24,18 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#1f4a3e",
+  themeColor: "#1e40af",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
+    <html lang="en" data-theme="light">
       <body className="min-h-dvh bg-background font-sans text-foreground antialiased">
         <ThemeProvider forcedTheme="light" attribute="class">
           <YardProvider>
-            <Shell>{children}</Shell>
+            <SyncProvider>
+              <Shell>{children}</Shell>
+            </SyncProvider>
           </YardProvider>
           <Toaster position="top-center" />
           <PwaRegister />
