@@ -35,6 +35,11 @@ export const EVENT_TYPES = [
   "arrival.corrected",
   "config.published",
   "config.rolled_back",
+  "ai.suggested",
+  "ai.accepted",
+  "ai.dismissed",
+  "ai.asked",
+  "feed.rejected_sender",
   "move.requested",
   "move.started",
   "move.completed",
@@ -45,8 +50,11 @@ export const EVENT_TYPES = [
 
 export type EventType = (typeof EVENT_TYPES)[number];
 
+/** Config and AI events describe the site or a suggestion. Trailer keys are optional. */
 const OPERATIONAL = new Set<EventType>(
-  EVENT_TYPES.filter((type) => !type.startsWith("config.")),
+  EVENT_TYPES.filter(
+    (type) => !type.startsWith("config.") && !type.startsWith("ai.") && !type.startsWith("feed."),
+  ),
 );
 
 export type YardEvent = {
@@ -224,6 +232,11 @@ export function eventLabel(type: EventType): string {
     "arrival.corrected": "Arrival time corrected",
     "config.published": "Config published",
     "config.rolled_back": "Config rolled back",
+    "ai.suggested": "AI suggestion",
+    "ai.accepted": "AI suggestion accepted",
+    "ai.dismissed": "AI suggestion dismissed",
+    "ai.asked": "Asked the yard",
+    "feed.rejected_sender": "Email rejected, sender not allowed",
     "move.requested": "Move requested",
     "move.started": "Move started",
     "move.completed": "Move completed",

@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { defaultSnapshot, validateSnapshot, type SiteConfigSnapshot } from "@/lib/domain/config";
 import { asJson } from "@/lib/db/json";
 import { addMinutes, shiftStartUtc } from "@/lib/domain/time";
-import { CARRIERS, DEMO_COMPANY_ID, DEMO_SITE_ID } from "@/lib/demo/ids";
+import { CARRIERS, DEMO_COMPANY_ID, DEMO_SITE_ID, DEMO_WEBHOOK_KEY } from "@/lib/demo/ids";
 import type { Database } from "@/lib/db/types";
 import { createAppointment, performCheckIn, publishConfig } from "@/lib/yard/operations";
 import { placementByName } from "@/lib/yard/locations";
@@ -39,6 +40,19 @@ export async function seedDemo(db: Database): Promise<void> {
     await tx.query(
       `insert into sites (id, company_id, name, timezone) values ($1, $2, $3, $4)`,
       [DEMO_SITE_ID, DEMO_COMPANY_ID, snapshot.siteName, snapshot.timezone],
+    );
+    await tx.query(`update sites set onboarded_at = now(), address = $2 where id = $1`, [
+      DEMO_SITE_ID,
+      "Lakeshore DC demo",
+    ]);
+    await tx.query(
+      `insert into feed_keys (id, site_id, key_hash, key_hint) values ($1, $2, $3, $4)`,
+      [
+        crypto.randomUUID(),
+        DEMO_SITE_ID,
+        createHash("sha256").update(DEMO_WEBHOOK_KEY).digest("hex"),
+        DEMO_WEBHOOK_KEY.slice(-4),
+      ],
     );
     for (const carrier of CARRIERS) {
       await tx.query(

@@ -11,6 +11,10 @@ export type SiteContext = {
   name: string;
   timezone: string;
   currentConfigId: string | null;
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  onboardedAt: string | null;
 };
 
 export type ConfigRecord = {
@@ -33,7 +37,8 @@ export type Clock = {
 
 export async function requireSite(sql: Sql): Promise<SiteContext> {
   const rows = await sql.query<Record<string, unknown>>(
-    `select s.id, s.company_id, s.name, s.timezone, s.current_config_id, c.name as company_name
+    `select s.id, s.company_id, s.name, s.timezone, s.current_config_id, c.name as company_name,
+            s.address, s.latitude, s.longitude, s.onboarded_at
      from sites s
      join companies c on c.id = s.company_id
      order by s.created_at
@@ -48,6 +53,10 @@ export async function requireSite(sql: Sql): Promise<SiteContext> {
     name: String(row.name),
     timezone: String(row.timezone),
     currentConfigId: asText(row.current_config_id),
+    address: asText(row.address),
+    latitude: asNumber(row.latitude),
+    longitude: asNumber(row.longitude),
+    onboardedAt: asIso(row.onboarded_at),
   };
 }
 

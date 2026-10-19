@@ -37,9 +37,22 @@ To start the morning over, use **Reset to morning** on the Simulator page, or de
 - **Simulator.** One fictional shift: arrivals, live unloads, moves onto doors, door completions, check-outs, late trucks, no-shows, a hot reefer with low fuel, an ID mismatch, and a seal mismatch. Speed is simulated minutes per real second. At 4 min/s the 6:00–18:00 shift takes about three minutes.
 - **Event log.** Every state change is an append-only row with a UUID, trailer, SCAC, load ID, appointment ID, location, UTC timestamp, and source (`manual` or `simulator`). The screen shows America/Chicago (or whatever timezone the wizard saved).
 
-## What is out of scope
+## Guided setup and yard suggestions
 
-Yard-driver move queue, detention invoices, CSV import, reports, EDI, a carrier portal, cameras, telematics, and SSO. The tables `move_requests`, `detention_terms`, and `memberships` are in the schema so those can land later without a new tenant model. This slice does not calculate free time or build a task queue. Dwell is a clock, not a bill.
+`/onboard` (also `/onboarding`) is the first-run path. Setup remains the editor after that.
+
+- **Location.** Drop a pin or use this browser's location. The sample pin is the Texas 2022 NAIP scene shipped in `public/imagery`. Address search stays off until `YARD_GEOCODER=mapbox_permanent` and a server-only `YARD_MAPBOX_TOKEN`.
+- **Doors and spots.** The map is [MapLibre](https://maplibre.org/) plus [Terra Draw](https://github.com/JamesLMilner/terra-draw): select, wall, door, zone, snapping, undo, and redo. "Add doors along this wall" spaces a count at about 4 m. Those marks are low confidence until you accept the group. "Accept all remaining" skips low confidence. A grid you choose can be published immediately. OpenStreetMap outlines are off unless `YARD_OSM_HINTS=on`, and they are not stored in the yard.
+- **Feeds.** Manual, CSV import, email-in, and a webhook. WMS and TMS connectors stay coming soon. Email is accepted only from allowlisted sender domains, and each message becomes a draft until a person confirms it.
+- **Gate.** The recommendation card is rules (closest powered door, holding spot, empty to the back row, a later appointment stays off a door). Check-in never waits on it. Tap Use to accept. Choose another, or ignore the card, and the suggestion is logged as dismissed.
+- **Optimize.** Scan the yard, then Send to driver queue. That inserts a hostler task and `move.requested`. The trailer stays put until a driver finishes the task. Held trailers are not suggested.
+- **Ask the yard.** Read only. Every answer lists the records it used and an as-of time. "Move X to Y" does not write; it offers a link to the normal optimize panel.
+
+The simulator logs a recommendation on each scripted check-in and one optimize suggestion when a door finishes. It does not create hostler tasks by itself.
+
+## What is still out of scope
+
+Detention invoices, a full EDI 856 parser, a carrier portal, cameras, telematics, and SSO. `detention_terms` and `memberships` are in the schema. Dwell is a clock, not a bill. The hostler queue records the task; a driver screen that completes it is not in this slice.
 
 ## Architecture
 
@@ -51,7 +64,9 @@ browser (Next.js App Router, PWA)
         → Postgres
 ```
 
-Postgres is embedded ([PGlite](https://pglite.dev/)) when `DATABASE_URL` is empty, and any Postgres (including Supabase) when `DATABASE_URL` is set. The SQL is `supabase/migrations/0001_schema.sql`. Row-level security is `supabase/migrations/0002_rls.sql` and is applied on Supabase only, because it calls `auth.uid()`.
+Postgres is embedded ([PGlite](https://pglite.dev/)) when `DATABASE_URL` is empty, and any Postgres (including Supabase) when `DATABASE_URL` is set. The SQL is `supabase/migrations/0001_schema.sql` plus `0003_onboarding.sql` (site location, feed keys, arrival drafts). Row-level security is `supabase/migrations/0002_rls.sql` and is applied on Supabase only, because it calls `auth.uid()`.
+
+The default basemap is self-hosted USDA NAIP, public domain, capture year 2022, one Texas quarter-quad. The browser requests `/imagery/naip/...` on this origin. Google, Mapbox, and Esri tiles are not used for tracing or as model input. A licensed tile URL is display-only, and only when `YARD_LICENSED_IMAGERY=on` and `YARD_LICENSED_TILE_URL` are both set.
 
 The browser never opens Postgres. It polls `GET /api/state` and listens to `GET /api/stream` (server-sent events once a second). That stream is the local stand-in for Supabase Realtime. Both modes use the same events.
 
@@ -84,7 +99,7 @@ Timestamps are stored in UTC. Boards and the log format them in the site timezon
 
 - One company and one site are loaded for the demo. The schema is keyed by `company_id` and `site_id` for a later second site.
 - There is no login in this slice. The Next.js server is the only database client and connects as the database owner, which bypasses row-level security.
-- Door assignment inside the simulator is a direct state change (`door.assigned`), not a driver task. The move queue table is unused.
+- Door assignment inside the simulator is still a direct state change (`door.assigned`). Sending an optimize move creates a `move_requests` row and does not assign the door.
 - A check-in to a spot is a drop. A check-in to a door is live (the driver waits).
 - A reefer on a dry door is allowed and flagged. It is not rejected.
 - Photos are stored as bytea on `photos`, not in object storage.
@@ -109,13 +124,14 @@ Timestamps are stored in UTC. Boards and the log format them in the site timezon
 PGlite is for the laptop demo. Vercel has no durable disk, so production must set `DATABASE_URL`.
 
 1. Create a Supabase project. In **Project Settings → Database**, copy the **Session pooler** connection string (URI). That is `DATABASE_URL`. Do not commit it.
-2. In the Supabase **SQL Editor**, run `supabase/migrations/0001_schema.sql`, then `supabase/migrations/0002_rls.sql`.
+2. In the Supabase **SQL Editor**, run `supabase/migrations/0001_schema.sql`, then `supabase/migrations/0002_rls.sql`, then `supabase/migrations/0003_onboarding.sql`.
 3. Optional, only if you later turn on Supabase Auth: insert a `memberships` row for your `auth.users` id. The current app does not send a user JWT. The Next.js server uses `DATABASE_URL` and bypasses RLS. Do not expose that URL to the browser.
 4. Create a Vercel project from this repo. Framework preset: Next.js. Set:
    - `DATABASE_URL` — the pooler URI from step 1
    - `NEXT_PUBLIC_SUPABASE_URL` — Project URL (optional until Auth or Realtime is wired)
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` — anon key (optional, same reason)
    - `SUPABASE_SERVICE_ROLE_KEY` — service role (optional, server-only, never `NEXT_PUBLIC_`)
+   - Leave the imagery, geocoder, and AI variables at the defaults in `.env.example` unless you have reviewed a paid provider. `YARD_AI_API_KEY` and `YARD_MAPBOX_TOKEN` are server-only.
 5. Deploy. The first request seeds Lakeshore Provisions if `companies` is empty.
 6. Open the deployment. Play the shift from **Simulator**.
 
@@ -149,6 +165,16 @@ Deferred from the same spec:
 - Confirm-sheet reason chips for every override, and an offline draft older than 12 hours auto-discard.
 - axe contrast run and a grayscale snapshot test. Chips are built so a grayscale review can still read the word and the icon.
 
+Deferred from the 19 Oct guided-setup and suggestion specs:
+
+- Separate pages for each onboarding step, portrait bottom sheet, and a 0.5 m nudge pad.
+- Multi-select, renumber preview, site-plan upload, and Microsoft building footprints.
+- `ai_suggestions` / `ai_feedback` tables and a weekly accept-rate screen. Suggestions are events (`ai.suggested`, `ai.accepted`, `ai.dismissed`, `ai.asked`) today.
+- Risk snooze, temperature trend, and lost-trailer flags.
+- A driver screen that completes the hostler task. Optimize only queues it.
+- Batch "send selected", a 50-question ask eval, and an EDI parser beyond the field reader.
+- Full Spanish catalog, camera and barcode, dark theme, long-press yard moves, kiosk, and PIN users remain deferred from slice 1.
+
 ## Tests
 
 `npm test` covers:
@@ -163,6 +189,8 @@ Deferred from the same spec:
 - Seal digit compare, hold versus accept, and which roles may clear a TEMP flag.
 - Outbox flush: one row per client id, and a flush that stops halfway does not send the saved row again.
 - `npm run test:touch` (Playwright) checks glove-sized targets on `/`, `/gate`, and `/doors` at 1180×820.
+- Rules recommendations, optimize ranking (held trailers excluded), ask-the-yard citations, NAIP tile host, door-draft confidence, and email allowlist plus a draft that does not become an arrival until confirm.
+- A Postgres check that Send to driver queue writes `move.requested` and does not change the visit location, and that a non-allowlisted sender writes no draft.
 
 ## Layout
 

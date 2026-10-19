@@ -5,6 +5,13 @@ import { eventLabel, type EventType } from "@/lib/domain/events";
 import { formatSiteTime } from "@/lib/domain/time";
 import { useYard } from "@/components/yard-provider";
 
+function eventNote(payload: Record<string, unknown> | undefined): string | null {
+  if (!payload) return null;
+  if (typeof payload.reason === "string" && payload.reason.trim()) return payload.reason;
+  if (typeof payload.question === "string" && payload.question.trim()) return payload.question;
+  return null;
+}
+
 type EventRow = {
   id: string;
   eventType: EventType;
@@ -16,6 +23,7 @@ type EventRow = {
   location: string | null;
   occurredAt: string;
   source: string;
+  payload?: Record<string, unknown>;
 };
 
 export function EventLog() {
@@ -109,7 +117,12 @@ export function EventLog() {
                   <td className="px-3 py-3 whitespace-nowrap">
                     {event.occurredAt ? formatSiteTime(event.occurredAt, timezone) : ""}
                   </td>
-                  <td className="px-3 py-3 font-medium">{eventLabel(event.eventType)}</td>
+                  <td className="px-3 py-3 font-medium">
+                    {eventLabel(event.eventType)}
+                    {eventNote(event.payload) ? (
+                      <span className="mt-1 block font-normal text-ink-muted">{eventNote(event.payload)}</span>
+                    ) : null}
+                  </td>
                   <td className="equip px-3 py-3">{event.trailerNumber ?? "—"}</td>
                   <td className="equip px-3 py-3">{event.scac ?? "—"}</td>
                   <td className="equip px-3 py-3">{event.loadId ?? "—"}</td>

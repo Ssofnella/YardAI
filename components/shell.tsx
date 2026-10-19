@@ -14,10 +14,30 @@ const NAV = [
   { href: "/", label: "Yard" },
   { href: "/doors", label: "Doors" },
   { href: "/gate", label: "Gate" },
+  { href: "/onboard", label: "Guided" },
   { href: "/setup", label: "Setup" },
   { href: "/events", label: "Events" },
   { href: "/simulator", label: "Simulator" },
 ];
+
+function navKey(href: string): string {
+  switch (href) {
+    case "/":
+      return "nav.yard";
+    case "/doors":
+      return "nav.doors";
+    case "/gate":
+      return "nav.gate";
+    case "/onboard":
+      return "nav.onboard";
+    case "/setup":
+      return "nav.setup";
+    case "/events":
+      return "nav.events";
+    default:
+      return "nav.simulator";
+  }
+}
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -62,20 +82,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
                     active ? "border-primary bg-primary text-white" : "border-slate-950 bg-white text-slate-950",
                   )}
                 >
-                  {t(
-                    item.href === "/"
-                      ? "nav.yard"
-                      : item.href === "/doors"
-                        ? "nav.doors"
-                        : item.href === "/gate"
-                          ? "nav.gate"
-                          : item.href === "/setup"
-                            ? "nav.setup"
-                            : item.href === "/events"
-                              ? "nav.events"
-                              : "nav.simulator",
-                    locale,
-                  )}
+                  {t(navKey(item.href), locale)}
                 </Link>
               );
             })}

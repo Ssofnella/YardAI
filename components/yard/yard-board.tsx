@@ -7,6 +7,7 @@ import { spotTypeLabel } from "@/components/labels";
 import { dwellFlag, FlagChip, orderedFlags, StateChip } from "@/components/status-chip";
 import { useSync } from "@/components/sync/sync-provider";
 import { Button } from "@/components/ui/button";
+import { YardTools } from "@/components/ai/yard-tools";
 import { useYard } from "@/components/yard-provider";
 import type { VisitView } from "@/lib/yard/state";
 import { cn } from "cn";
@@ -99,6 +100,8 @@ export function YardBoard() {
           </Button>
         </div>
       </div>
+
+      <YardTools />
 
       <div className="grid gap-4 md:grid-cols-[1fr_auto_auto_auto]">
         <input

@@ -5,10 +5,10 @@ let cached: string | null = null;
 
 export function schemaSql(): string {
   if (!cached) {
-    cached = readFileSync(
-      join(process.cwd(), "supabase/migrations/0001_schema.sql"),
-      "utf8",
-    );
+    const dir = join(process.cwd(), "supabase/migrations");
+    cached = ["0001_schema.sql", "0003_onboarding.sql"]
+      .map((name) => readFileSync(join(dir, name), "utf8"))
+      .join("\n");
   }
   return cached;
 }

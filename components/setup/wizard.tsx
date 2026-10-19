@@ -93,6 +93,9 @@ export function SetupWizard() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Site setup</h1>
         <p className="text-sm text-muted-foreground">
+          Advanced edit for doors, statuses, and rules. New sites start in <a className="underline" href="/onboard">guided setup</a>.
+        </p>
+        <p className="text-sm text-muted-foreground">
           Version {state.config.version} is live. Publishing saves a new version the yard, doors, and gate
           all read. You can roll back.
         </p>

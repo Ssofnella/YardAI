@@ -8,6 +8,7 @@ const en: Record<string, string> = {
   "nav.doors": "Doors",
   "nav.gate": "Gate",
   "nav.setup": "Setup",
+  "nav.onboard": "Guided",
   "nav.events": "Events",
   "nav.simulator": "Simulator",
   "nav.tv": "TV",

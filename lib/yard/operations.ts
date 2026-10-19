@@ -1,6 +1,8 @@
 import type { SiteConfigSnapshot } from "@/lib/domain/config";
 import { validateSnapshot } from "@/lib/domain/config";
 import { createEvent, type EventSource, type YardEvent } from "@/lib/domain/events";
+import type { CsvArrival } from "@/lib/onboarding/csv";
+import { parseAppointmentEmail, senderAllowed } from "@/lib/onboarding/email";
 import { matchArrival, type ArrivalKey } from "@/lib/domain/matching";
 import { fuelMarkToPct, reeferAlerts } from "@/lib/domain/reefer";
 import { checkSeals } from "@/lib/domain/seals";
@@ -51,6 +53,16 @@ export type CheckInInput = {
   unitRunning?: boolean | null;
   fuelLevel?: string | null;
   gateName?: string | null;
+  /** What the clerk saw, and whether they kept it. Logged as AI events. */
+  ai?: {
+    suggestionId: string;
+    placeKind: "door" | "spot";
+    placeId: string;
+    placeName: string;
+    reason: string;
+    provider: "heuristic" | "model";
+    accepted: boolean;
+  } | null;
 };
 
 export type OperationResult = {
@@ -462,13 +474,28 @@ export async function performCheckIn(db: Database, input: CheckInInput): Promise
       }),
     );
     for (const event of stamped) await insertEvent(tx, event);
+    const aiEvents = arrivalSuggestionEvents({
+      siteId: site.id,
+      companyId: site.companyId,
+      trailerId,
+      trailerNumber,
+      scac,
+      loadId: blank(input.loadId) ?? appointment?.load_id ?? null,
+      appointmentId: appointment?.appointment_code ?? null,
+      location: placement.label,
+      occurredAt,
+      visitId,
+      source: input.source,
+      ai: input.ai,
+    });
+    for (const event of aiEvents) await insertEvent(tx, event);
     const notice = sealFlow.flag
       ? flags.find((flag) => flag.code === "seal_mismatch" || flag.code === "seal_missing" || flag.code === "hold")
           ?.detail ?? null
       : match.idMismatch
         ? match.reasons.join(" ")
         : null;
-    return { visitId, events: stamped, flags, notice };
+    return { visitId, events: [...stamped, ...aiEvents], flags, notice };
   });
 }
 
@@ -915,6 +942,296 @@ export async function rollbackConfig(
     );
     return { version: Number(row.version) };
   });
+}
+
+function arrivalSuggestionEvents(input: {
+  siteId: string;
+  companyId: string;
+  trailerId: string | null;
+  trailerNumber: string;
+  scac: string;
+  loadId: string | null;
+  appointmentId: string | null;
+  location: string;
+  occurredAt: string;
+  visitId: string;
+  source: EventSource;
+  ai?: CheckInInput["ai"];
+}): YardEvent[] {
+  if (!input.ai?.suggestionId || !input.ai.placeName) return [];
+  const shared = {
+    siteId: input.siteId,
+    companyId: input.companyId,
+    trailerId: input.trailerId,
+    trailerNumber: input.trailerNumber,
+    scac: input.scac,
+    loadId: input.loadId,
+    appointmentId: input.appointmentId,
+    location: input.location,
+    occurredAt: input.occurredAt,
+    source: input.source,
+    visitId: input.visitId,
+  };
+  return [
+    createEvent({
+      ...shared,
+      eventType: "ai.suggested",
+      payload: {
+        suggestionId: input.ai.suggestionId,
+        kind: "recommend",
+        reason: input.ai.reason,
+        placeKind: input.ai.placeKind,
+        placeId: input.ai.placeId,
+        placeName: input.ai.placeName,
+        provider: input.ai.provider,
+      },
+    }),
+    createEvent({
+      ...shared,
+      eventType: input.ai.accepted ? "ai.accepted" : "ai.dismissed",
+      payload: {
+        suggestionId: input.ai.suggestionId,
+        kind: "recommend",
+        placeName: input.ai.placeName,
+        accepted: input.ai.accepted,
+      },
+    }),
+  ];
+}
+
+export async function logSiteSuggestion(
+  db: Database,
+  input: {
+    kind: "optimize" | "recommend" | "ask";
+    suggestionId: string;
+    payload: Record<string, unknown>;
+    occurredAt?: string;
+    source: EventSource;
+    eventType?: "ai.suggested" | "ai.asked" | "ai.dismissed";
+    trailerNumber?: string | null;
+    scac?: string | null;
+    location?: string | null;
+  },
+): Promise<YardEvent> {
+  return db.transaction(async (tx) => {
+    const site = await requireSite(tx);
+    const clock = await readClock(tx, site.id);
+    const event = createEvent({
+      siteId: site.id,
+      companyId: site.companyId,
+      eventType: input.eventType ?? (input.kind === "ask" ? "ai.asked" : "ai.suggested"),
+      trailerNumber: input.trailerNumber,
+      scac: input.scac,
+      location: input.location ?? site.name,
+      occurredAt: input.occurredAt ?? clock.asOf,
+      source: input.source,
+      payload: { kind: input.kind, suggestionId: input.suggestionId, ...input.payload },
+    });
+    await insertEvent(tx, event);
+    return event;
+  });
+}
+
+export async function acceptYardMove(
+  db: Database,
+  input: {
+    visitId: string;
+    toKind: "door" | "spot";
+    toId: string;
+    toName: string;
+    fromName: string;
+    suggestionId: string;
+    reason: string;
+    kind: "respot" | "door_swap";
+    detentionMinutes: number;
+    dockIdleMinutes: number;
+    source?: EventSource;
+  },
+): Promise<{ moveId: string; duplicate: boolean }> {
+  return db.transaction(async (tx) => {
+    const site = await requireSite(tx);
+    const clock = await readClock(tx, site.id);
+    const config = await loadConfig(tx, site);
+    const visits = await tx.query<Record<string, unknown>>(
+      `select id, trailer_id, trailer_number, scac, load_id, appointment_code, location_label
+       from visits where id = $1 and site_id = $2 and checked_out_at is null`,
+      [input.visitId, site.id],
+    );
+    const visit = visits[0];
+    if (!visit) throw new YardError("That trailer is not on the yard");
+    const place = placementById(config.snapshot, input.toKind, input.toId);
+    const existing = await tx.query<{ id: string }>(
+      `select id from move_requests
+       where visit_id = $1 and to_location = $2 and status = 'requested' limit 1`,
+      [input.visitId, place.label],
+    );
+    if (existing[0]) return { moveId: existing[0].id, duplicate: true };
+    const moveId = crypto.randomUUID();
+    const priority = input.detentionMinutes >= 20 ? "high" : "normal";
+    await tx.query(
+      `insert into move_requests (
+         id, company_id, site_id, visit_id, trailer_number, scac, from_location, to_location,
+         priority, status, requested_at
+       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'requested',$10)`,
+      [
+        moveId,
+        site.companyId,
+        site.id,
+        input.visitId,
+        visit.trailer_number,
+        visit.scac,
+        input.fromName || asTextish(visit.location_label),
+        place.label,
+        priority,
+        clock.asOf,
+      ],
+    );
+    const location = asTextish(visit.location_label) || input.fromName.trim() || "Yard";
+    const shared = {
+      siteId: site.id,
+      companyId: site.companyId,
+      trailerId: asTextish(visit.trailer_id),
+      trailerNumber: String(visit.trailer_number),
+      scac: String(visit.scac),
+      loadId: asTextish(visit.load_id),
+      appointmentId: asTextish(visit.appointment_code),
+      location,
+      occurredAt: clock.asOf,
+      source: input.source ?? "manual",
+      visitId: input.visitId,
+    };
+    await insertEvent(
+      tx,
+      createEvent({
+        ...shared,
+        eventType: "ai.accepted",
+        payload: {
+          suggestionId: input.suggestionId,
+          kind: "optimize",
+          moveKind: input.kind,
+          to: place.label,
+          reason: input.reason,
+        },
+      }),
+    );
+    await insertEvent(
+      tx,
+      createEvent({
+        ...shared,
+        eventType: "move.requested",
+        payload: {
+          moveId,
+          to: place.label,
+          toId: place.id,
+          kind: input.kind,
+          reason: input.reason,
+          detentionMinutes: input.detentionMinutes,
+          dockIdleMinutes: input.dockIdleMinutes,
+          priority,
+        },
+      }),
+    );
+    return { moveId, duplicate: false };
+  });
+}
+
+export async function importArrivals(
+  db: Database,
+  rows: CsvArrival[],
+  source: EventSource,
+  occurredAt: string,
+): Promise<{ created: number; skipped: number }> {
+  let created = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    const before = await db.query<{ id: string }>(
+      `select id from appointments where appointment_code = $1`,
+      [row.code],
+    );
+    if (before.length) {
+      skipped += 1;
+      continue;
+    }
+    await createAppointment(db, {
+      code: row.code,
+      carrierName: row.carrierName,
+      scac: row.scac,
+      trailerNumber: row.trailerNumber,
+      driverName: row.driverName,
+      loadId: row.loadId,
+      loadType: row.loadType,
+      emptyOrLoaded: row.emptyOrLoaded,
+      isReefer: row.isReefer,
+      setpointF: row.setpointF,
+      expectedSeal: row.expectedSeal,
+      plannedAt: row.plannedAt,
+      occurredAt,
+      source,
+    });
+    created += 1;
+  }
+  return { created, skipped };
+}
+
+export async function receiveEmailDraft(
+  db: Database,
+  input: { from: string; subject?: string | null; text: string; occurredAt?: string },
+): Promise<{ status: "draft" | "rejected"; id?: string; appointment?: CsvArrival }> {
+  return db.transaction(async (tx) => {
+    const site = await requireSite(tx);
+    const config = await loadConfig(tx, site);
+    const clock = await readClock(tx, site.id);
+    const allow = config.snapshot.feeds.allowedSenders;
+    if (!senderAllowed(input.from, allow)) {
+      await insertEvent(
+        tx,
+        createEvent({
+          siteId: site.id,
+          companyId: site.companyId,
+          eventType: "feed.rejected_sender",
+          location: site.name,
+          occurredAt: input.occurredAt ?? clock.asOf,
+          source: "manual",
+          payload: { from: input.from, allowlist: allow },
+        }),
+      );
+      return { status: "rejected" };
+    }
+    const parsed = parseAppointmentEmail(input.text);
+    if ("error" in parsed) throw new YardError(parsed.error);
+    const id = crypto.randomUUID();
+    await tx.query(
+      `insert into arrival_drafts (id, site_id, sender, subject, body, parsed, status)
+       values ($1,$2,$3,$4,$5,$6::jsonb,'draft')`,
+      [id, site.id, input.from, input.subject ?? null, input.text, JSON.stringify(parsed)],
+    );
+    return { status: "draft", id, appointment: parsed };
+  });
+}
+
+export async function confirmArrivalDraft(
+  db: Database,
+  draftId: string,
+): Promise<{ created: number }> {
+  const rows = await db.query<Record<string, unknown>>(
+    `select id, parsed, status from arrival_drafts where id = $1`,
+    [draftId],
+  );
+  const row = rows[0];
+  if (!row) throw new YardError("That draft is not on this site");
+  if (row.status === "confirmed") return { created: 0 };
+  const parsed = asJson<CsvArrival>(row.parsed, {} as CsvArrival);
+  const site = await requireSite(db);
+  const clock = await readClock(db, site.id);
+  const result = await importArrivals(db, [parsed], "manual", clock.asOf);
+  await db.query(`update arrival_drafts set status = 'confirmed' where id = $1`, [draftId]);
+  return result;
+}
+
+function asTextish(value: unknown): string | null {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 function resolveCheckInPlace(

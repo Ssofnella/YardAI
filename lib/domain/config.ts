@@ -44,6 +44,8 @@ export type DoorDef = {
   name: string;
   type: DoorType;
   sort: number;
+  lng?: number | null;
+  lat?: number | null;
 };
 
 export type ZoneDef = {
@@ -59,6 +61,39 @@ export type SpotDef = {
   type: SpotType;
   row: number;
   col: number;
+  lng?: number | null;
+  lat?: number | null;
+};
+
+export type FeedMode = "manual" | "csv" | "email" | "webhook";
+export type ImageryProviderId = "naip" | "plain" | "licensed_basemap";
+export type GeocoderSetting = "manual_pin" | "device_gps" | "mapbox_permanent";
+export type AiRuntimeSetting = "rules" | "model";
+
+/** Which arrival feed is turned on. Secrets stay out of this snapshot. */
+export type SiteFeeds = {
+  mode: FeedMode;
+  emailAddress: string;
+  webhookHint: string | null;
+  /** Domains allowed to create email drafts. Empty rejects every sender. */
+  allowedSenders: string[];
+  /** Fixed off. Parsed mail becomes a draft a person confirms. */
+  autoCreate: false;
+};
+
+export type ImagerySettings = {
+  provider: ImageryProviderId;
+  captureYear: number;
+  licensedEnabled: boolean;
+};
+
+export type AiSwitches = {
+  provider: AiRuntimeSetting;
+  layoutSuggestions: boolean;
+  arrivalRecommendation: boolean;
+  optimize: boolean;
+  riskFlags: boolean;
+  askTheYard: boolean;
 };
 
 export type StatusDef = {
@@ -101,6 +136,11 @@ export type SiteConfigSnapshot = {
   loadTypes: LoadTypeDef[];
   reefer: ReeferLimits;
   policies: SitePolicies;
+  feeds: SiteFeeds;
+  imagery: ImagerySettings;
+  geocoder: GeocoderSetting;
+  ai: AiSwitches;
+  emailDomain: string;
 };
 
 export class ConfigError extends Error {
@@ -115,6 +155,7 @@ const SPOT_TYPES = new Set<SpotType>(["dry", "reefer", "staging", "holding", "ou
 const FUEL_MARKS = new Set<FuelMark>(["E", "1/4", "1/2", "3/4", "F"]);
 const DEVICE_TYPES = new Set<DeviceType>(["ipad_landscape", "ipad_portrait", "phone", "android_tablet"]);
 const SEAL_POLICIES = new Set<SealMismatchPolicy>(["hold", "allow_with_reason", "note"]);
+const FEED_MODES = new Set<FeedMode>(["manual", "csv", "email", "webhook"]);
 const YARD_ROLES = new Set<YardRole>(["admin", "office", "gate"]);
 const FIELD_TYPES = new Set<FieldType>([
   "text",
@@ -229,6 +270,37 @@ export function defaultSnapshot(): SiteConfigSnapshot {
     ],
     reefer: { tempToleranceF: 5, minFuelPct: 25 },
     policies: defaultPolicies(),
+    feeds: defaultFeeds(),
+    imagery: defaultImagery(),
+    geocoder: "manual_pin",
+    ai: defaultAiSwitches(),
+    emailDomain: "in.yardline.example",
+  };
+}
+
+export function defaultImagery(): ImagerySettings {
+  return { provider: "naip", captureYear: 2022, licensedEnabled: false };
+}
+
+export function defaultAiSwitches(): AiSwitches {
+  return {
+    provider: "rules",
+    layoutSuggestions: true,
+    arrivalRecommendation: true,
+    optimize: true,
+    riskFlags: true,
+    askTheYard: true,
+  };
+}
+
+export function defaultFeeds(siteId = "lakeshore"): SiteFeeds {
+  const slug = siteId.replace(/[^a-z0-9]/gi, "").slice(0, 8).toLowerCase() || "site";
+  return {
+    mode: "manual",
+    emailAddress: `dfw-${slug}@in.yardline.example`,
+    webhookHint: null,
+    allowedSenders: [],
+    autoCreate: false,
   };
 }
 
@@ -335,6 +407,11 @@ export function validateSnapshot(input: SiteConfigSnapshot): SiteConfigSnapshot 
   }
   snapshot.reefer = { tempToleranceF: tolerance, minFuelPct: fuel };
   snapshot.policies = normalizePolicies(snapshot.policies);
+  snapshot.feeds = normalizeFeeds(snapshot.feeds);
+  snapshot.imagery = normalizeImagery(snapshot.imagery);
+  snapshot.geocoder = GEOCODERS.has(snapshot.geocoder) ? snapshot.geocoder : "manual_pin";
+  snapshot.ai = normalizeAi(snapshot.ai);
+  snapshot.emailDomain = (snapshot.emailDomain || "in.yardline.example").trim().toLowerCase();
   snapshot.siteName = snapshot.siteName.trim();
   snapshot.companyName = snapshot.companyName.trim();
   return snapshot;
@@ -365,6 +442,48 @@ function assertUnique(values: string[], label: string) {
     if (seen.has(value)) throw new ConfigError(`Duplicate ${label}: ${value}`);
     seen.add(value);
   }
+}
+
+export function normalizeFeeds(input: Partial<SiteFeeds> | null | undefined): SiteFeeds {
+  const base = defaultFeeds();
+  const source = input ?? {};
+  const email = (source.emailAddress ?? "").trim();
+  return {
+    mode: FEED_MODES.has(source.mode as FeedMode) ? (source.mode as FeedMode) : base.mode,
+    emailAddress: email.includes("@") ? email : base.emailAddress,
+    webhookHint: source.webhookHint?.trim() || null,
+    allowedSenders: Array.isArray(source.allowedSenders)
+      ? source.allowedSenders.map((item) => item.trim().toLowerCase().replace(/^@/, "")).filter(Boolean)
+      : [],
+    autoCreate: false,
+  };
+}
+
+const IMAGERY = new Set<ImageryProviderId>(["naip", "plain", "licensed_basemap"]);
+const GEOCODERS = new Set<GeocoderSetting>(["manual_pin", "device_gps", "mapbox_permanent"]);
+
+export function normalizeImagery(input: Partial<ImagerySettings> | null | undefined): ImagerySettings {
+  const base = defaultImagery();
+  const source = input ?? {};
+  const year = Number(source.captureYear);
+  return {
+    provider: IMAGERY.has(source.provider as ImageryProviderId) ? (source.provider as ImageryProviderId) : base.provider,
+    captureYear: Number.isFinite(year) ? year : base.captureYear,
+    licensedEnabled: source.licensedEnabled === true,
+  };
+}
+
+export function normalizeAi(input: Partial<AiSwitches> | null | undefined): AiSwitches {
+  const base = defaultAiSwitches();
+  const source = input ?? {};
+  return {
+    provider: source.provider === "model" ? "model" : base.provider,
+    layoutSuggestions: source.layoutSuggestions !== false,
+    arrivalRecommendation: source.arrivalRecommendation !== false,
+    optimize: source.optimize !== false,
+    riskFlags: source.riskFlags !== false,
+    askTheYard: source.askTheYard !== false,
+  };
 }
 
 export function normalizePolicies(input: Partial<SitePolicies> | null | undefined): SitePolicies {

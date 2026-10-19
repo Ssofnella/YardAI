@@ -50,7 +50,8 @@ export function SimulatorPanel() {
         <h1 className="text-2xl font-semibold tracking-tight">Simulator</h1>
         <p className="max-w-2xl text-sm text-muted-foreground">
           Plays one fictional shift at Lakeshore DC: arrivals, door moves, live unloads, and check-outs.
-          It uses the same check-in path as the gate. Nothing here is a real carrier or driver.
+          Each scripted arrival logs a rules recommendation. A finished door logs an optimize suggestion.
+          Accepting a move on the yard board creates a hostler task. Nothing here is a real carrier or driver.
         </p>
       </div>
 

@@ -63,7 +63,30 @@ export type YardState = {
     companyName: string;
     name: string;
     timezone: string;
+    address: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    onboardedAt: string | null;
   };
+  moveRequests: {
+    id: string;
+    visitId: string | null;
+    trailerNumber: string | null;
+    scac: string | null;
+    fromLocation: string | null;
+    toLocation: string | null;
+    priority: string;
+    status: string;
+    requestedAt: string;
+  }[];
+  suggestions: {
+    id: string;
+    eventType: string;
+    occurredAt: string;
+    trailerNumber: string | null;
+    location: string | null;
+    payload: Record<string, unknown>;
+  }[];
   config: ConfigRecord;
   versions: { id: string; version: number; note: string | null; createdAt: string }[];
   clock: Clock;
@@ -109,6 +132,18 @@ export async function getYardState(db: Database): Promise<YardState> {
     `select count(*)::int as count from events where site_id = $1`,
     [site.id],
   );
+  const moves = await db.query<Record<string, unknown>>(
+    `select id, visit_id, trailer_number, scac, from_location, to_location, priority, status, requested_at
+     from move_requests where site_id = $1 and status in ('requested', 'started')
+     order by requested_at desc limit 20`,
+    [site.id],
+  );
+  const suggestions = await db.query<Record<string, unknown>>(
+    `select id, event_type, occurred_at, trailer_number, location, payload
+     from events where site_id = $1 and event_type like 'ai.%'
+     order by occurred_at desc limit 8`,
+    [site.id],
+  );
   const visitViews = visits.map(mapVisit);
   const appointmentViews = appointments.map(mapAppointment);
   return {
@@ -118,6 +153,10 @@ export async function getYardState(db: Database): Promise<YardState> {
       companyName: site.companyName,
       name: site.name,
       timezone: config.snapshot.timezone || site.timezone,
+      address: site.address,
+      latitude: site.latitude,
+      longitude: site.longitude,
+      onboardedAt: site.onboardedAt,
     },
     config,
     versions: versions.map((row) => ({
@@ -131,6 +170,25 @@ export async function getYardState(db: Database): Promise<YardState> {
     appointments: appointmentViews,
     visits: visitViews,
     eventCount: Number(eventCount[0]?.count ?? 0),
+    moveRequests: moves.map((row) => ({
+      id: String(row.id),
+      visitId: asText(row.visit_id),
+      trailerNumber: asText(row.trailer_number),
+      scac: asText(row.scac),
+      fromLocation: asText(row.from_location),
+      toLocation: asText(row.to_location),
+      priority: String(row.priority ?? "normal"),
+      status: String(row.status ?? "requested"),
+      requestedAt: asIso(row.requested_at) ?? "",
+    })),
+    suggestions: suggestions.map((row) => ({
+      id: String(row.id),
+      eventType: String(row.event_type),
+      occurredAt: asIso(row.occurred_at) ?? "",
+      trailerNumber: asText(row.trailer_number),
+      location: asText(row.location),
+      payload: asJson<Record<string, unknown>>(row.payload, {}),
+    })),
     counts: {
       onYard: visitViews.length,
       atDoors: visitViews.filter((visit) => visit.locationKind === "door").length,

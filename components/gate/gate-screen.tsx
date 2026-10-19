@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { CloudOff, Snowflake } from "lucide-react";
 import { toast } from "sonner";
+import { rankPlaces, recommendPlace } from "@/lib/ai/heuristic";
 import type { FuelMark } from "@/lib/domain/config";
 import { reeferAlerts } from "@/lib/domain/reefer";
 import { sealGlyphs } from "@/lib/domain/seals";
@@ -42,6 +43,8 @@ type FormState = {
   tempF: number | null;
   fuel: Fuel | null;
   locationId: string;
+  locationKind: "" | "spot" | "door";
+  recommendationChoice: "" | "use" | "override";
   gateName: string;
 };
 
@@ -74,6 +77,8 @@ function blankForm(arrivedAt: string, gateName: string): FormState {
     tempF: null,
     fuel: null,
     locationId: "",
+    locationKind: "",
+    recommendationChoice: "",
     gateName,
   };
 }
@@ -184,6 +189,37 @@ export function GateScreen() {
     spotChoices.find((spot) => !occupied.has(spot.id) && (form?.isReefer ? spot.type === "reefer" || spot.type === "holding" : true)) ??
     spotChoices.find((spot) => !occupied.has(spot.id)) ??
     null;
+  const zoneSort = new Map(snapshot.zones.map((zone) => [zone.id, zone.sort]));
+  const recommendInput = {
+    now: clock,
+    request: {
+      isReefer: Boolean(form?.isReefer),
+      loadType: form?.loadType || "inbound",
+      emptyOrLoaded: form?.emptyOrLoaded || "loaded",
+      plannedAt: selected?.plannedAt ?? null,
+      handling: "auto" as const,
+      restrict: holdingOnly ? ("holding" as const) : null,
+    },
+    doors: snapshot.doors.map((door) => ({
+      id: door.id,
+      name: door.name,
+      type: door.type,
+      sort: door.sort,
+      occupied: occupied.has(door.id),
+    })),
+    spots: snapshot.spots.map((spot) => ({
+      id: spot.id,
+      name: spot.name,
+      type: spot.type,
+      zoneId: spot.zoneId,
+      zoneSort: zoneSort.get(spot.zoneId) ?? 1,
+      row: spot.row,
+      col: spot.col,
+      occupied: occupied.has(spot.id),
+    })),
+  };
+  const recommendation = snapshot.ai?.arrivalRecommendation === false || !form ? null : recommendPlace(recommendInput);
+  const alternatives = recommendation ? rankPlaces(recommendInput).slice(1, 3) : [];
 
   const missing: string[] = [];
   if (form) {
@@ -204,6 +240,8 @@ export function GateScreen() {
     if (!form || missing.length || !state) return;
     const locationId = form.locationId || suggested?.id;
     if (!locationId) return;
+    const locationKind = form.locationId ? form.locationKind || "spot" : "spot";
+    const acceptedAi = form.recommendationChoice === "use" && form.locationId === recommendation?.place.id;
     const deviceId = window.localStorage.getItem("yardline.device") ?? crypto.randomUUID();
     window.localStorage.setItem("yardline.device", deviceId);
     try {
@@ -224,8 +262,19 @@ export function GateScreen() {
         fuelLevel: form.fuel,
         unitRunning: form.unitRunning,
         appointmentId: form.appointmentId || null,
-        locationKind: "spot",
+        locationKind,
         locationId,
+        ai: recommendation?.place.id
+          ? {
+              suggestionId: recommendation.suggestionId,
+              placeKind: recommendation.place.kind,
+              placeId: recommendation.place.id,
+              placeName: recommendation.place.name,
+              reason: recommendation.reason,
+              provider: "heuristic" as const,
+              accepted: acceptedAi,
+            }
+          : null,
         arrivedAt: form.arrivedAt,
         arrivalReason: form.arrivalReason || null,
         sealDecision: form.sealDecision ?? (sealMismatch ? null : "match"),
@@ -695,35 +744,91 @@ export function GateScreen() {
               {reefer?.tempOutOfRange ? <FlagChip code="reefer_temp" /> : null}
               {reefer?.fuelLow ? <FlagChip code="reefer_fuel" /> : null}
             </div>
-            <div className="rounded-card border-2 border-dashed border-line p-3">
-              <p className="text-fl-meta text-ink-muted">Suggested spot</p>
-              <p className="font-id text-fl-id">{suggested && policies.spotsNumbered ? suggested.name : suggested?.type ?? "None open"}</p>
-              {suggested ? (
-                <button
-                  type="button"
-                  data-touch
-                  className="mt-3 min-h-touch-field w-full rounded-card bg-primary text-fl-label text-white"
-                  onClick={() => patch({ locationId: suggested.id })}
-                >
-                  {t("gate.useSpot", locale)} {policies.spotsNumbered ? suggested.name : suggested.type}
-                </button>
-              ) : null}
-            </div>
+            {recommendation?.place.id ? (
+              <div className="rounded-card border-2 border-dashed border-violet-800 bg-violet-50 p-3">
+                <p className="text-fl-meta font-semibold text-violet-900">Suggested · Recommended</p>
+                <p className="font-id text-fl-id">{recommendation.place.name}</p>
+                <p className="text-fl-body">{recommendation.reason}</p>
+                <p className="text-fl-meta text-ink-muted">Rules only. Check-in does not wait, and this is not applied until you tap Use.</p>
+                <div className="mt-3 flex flex-col gap-4">
+                  <button
+                    type="button"
+                    data-touch
+                    className="min-h-touch-field w-full rounded-card bg-primary text-fl-label text-white"
+                    onClick={() =>
+                      patch({
+                        locationId: recommendation.place.id,
+                        locationKind: recommendation.place.kind,
+                        recommendationChoice: "use",
+                      })
+                    }
+                  >
+                    Use {recommendation.place.name}
+                  </button>
+                  <button
+                    type="button"
+                    data-touch
+                    className="min-h-touch-field w-full rounded-card border-2 border-slate-950 bg-white text-fl-label"
+                    onClick={() => {
+                      patch({ recommendationChoice: "override" });
+                      document.getElementById("gate-place")?.focus();
+                    }}
+                  >
+                    Choose another
+                  </button>
+                </div>
+                {alternatives.length ? (
+                  <ul className="mt-3 text-fl-meta">
+                    {alternatives.map((item) => (
+                      <li key={item.place.id}>
+                        {item.place.name}: {item.reason}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-card border-2 border-dashed border-line p-3">
+                <p className="text-fl-meta text-ink-muted">Suggested spot</p>
+                <p className="font-id text-fl-id">{suggested && policies.spotsNumbered ? suggested.name : suggested?.type ?? "None open"}</p>
+              </div>
+            )}
             <label className="flex flex-col gap-2 text-fl-label">
               {t("gate.chooseAnother", locale)}
               <select
+                id="gate-place"
                 data-touch
                 className="min-h-touch-field rounded-card border-2 border-line bg-white px-2"
                 value={form.locationId}
-                onChange={(event) => patch({ locationId: event.target.value })}
+                onChange={(event) => {
+                  const id = event.target.value;
+                  const door = snapshot.doors.some((item) => item.id === id);
+                  patch({
+                    locationId: id,
+                    locationKind: door ? "door" : "spot",
+                    recommendationChoice: id ? "override" : "",
+                  });
+                }}
               >
-                <option value="">Suggested</option>
-                {spotChoices.map((spot) => (
-                  <option key={spot.id} value={spot.id} disabled={occupied.has(spot.id)}>
-                    {policies.spotsNumbered ? spot.name : spot.type}
-                    {occupied.has(spot.id) ? " occupied" : ""}
-                  </option>
-                ))}
+                <option value="">No place picked</option>
+                {holdingOnly ? null : (
+                  <optgroup label="Doors">
+                    {snapshot.doors.map((door) => (
+                      <option key={door.id} value={door.id} disabled={occupied.has(door.id)}>
+                        {door.name}
+                        {occupied.has(door.id) ? " occupied" : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Spots">
+                  {spotChoices.map((spot) => (
+                    <option key={spot.id} value={spot.id} disabled={occupied.has(spot.id)}>
+                      {policies.spotsNumbered ? spot.name : spot.type}
+                      {occupied.has(spot.id) ? " occupied" : ""}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </label>
             {missing.length ? (

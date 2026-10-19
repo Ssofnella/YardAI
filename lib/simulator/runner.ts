@@ -4,9 +4,12 @@ import { getDatabase } from "@/lib/db/client";
 import { DEMO_SITE_ID } from "@/lib/demo/ids";
 import { resetOperational } from "@/lib/seed/demo";
 import { shiftStartUtc } from "@/lib/domain/time";
+import { activeProvider } from "@/lib/ai/provider";
+import { optimizeInput, recommendInput } from "@/lib/ai/snapshot";
 import {
   assignDoor,
   completeDoorWork,
+  logSiteSuggestion,
   markNoShow,
   performCheckIn,
   performCheckOut,
@@ -200,6 +203,8 @@ export async function applyScriptStep(db: Database, step: SimStep) {
     return;
   }
   if (step.kind === "check_in") {
+    const plannedAt = new Date(new Date(step.at).getTime() - stop.arriveOffsetMin * 60_000).toISOString();
+    const suggestion = await arrivalSuggestion(db, step.at, stop, plannedAt);
     await performCheckIn(db, {
       trailerNumber: stop.checkInTrailer ?? stop.trailerNumber,
       scac: stop.checkInScac ?? stop.scac,
@@ -219,6 +224,7 @@ export async function applyScriptStep(db: Database, step: SimStep) {
       preferredPlace: stop.liveDoor ? stop.doorName : stop.spotName,
       occurredAt: step.at,
       source: "simulator",
+      ai: suggestion,
     });
     return;
   }
@@ -238,6 +244,7 @@ export async function applyScriptStep(db: Database, step: SimStep) {
       occurredAt: step.at,
       source: "simulator",
     });
+    await logOptimizePass(db, step.at, step.id);
     return;
   }
   await performCheckOut(db, {
@@ -246,6 +253,70 @@ export async function applyScriptStep(db: Database, step: SimStep) {
     occurredAt: step.at,
     source: "simulator",
   });
+}
+
+async function arrivalSuggestion(
+  db: Database,
+  now: string,
+  stop: NonNullable<ReturnType<typeof stopByCode>>,
+  plannedAt: string,
+) {
+  try {
+    const rec = await activeProvider().recommend(
+      await recommendInput(db, now, {
+        isReefer: stop.isReefer,
+        loadType: stop.loadType,
+        emptyOrLoaded: stop.emptyOrLoaded,
+        plannedAt,
+        handling: stop.liveDoor ? "live" : "drop",
+      }),
+    );
+    const scripted = (stop.liveDoor ? stop.doorName : stop.spotName) ?? "";
+    return {
+      suggestionId: rec.suggestionId,
+      placeKind: rec.place.kind,
+      placeId: rec.place.id,
+      placeName: rec.place.name,
+      reason: rec.reason,
+      provider: rec.provider,
+      accepted: scripted.toLowerCase() === rec.place.name.toLowerCase(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function logOptimizePass(db: Database, now: string, stepId: string) {
+  try {
+    const plan = await activeProvider().optimize(await optimizeInput(db, now));
+    if (!plan.moves.length) return;
+    await logSiteSuggestion(db, {
+      kind: "optimize",
+      suggestionId: `opt:${stepId}`,
+      source: "simulator",
+      occurredAt: now,
+      payload: {
+        provider: plan.provider,
+        reason: plan.moves[0]?.reason ?? "Yard scan",
+        moves: plan.moves.map((move) => ({
+          id: move.id,
+          visitId: move.visitId,
+          trailerNumber: move.trailerNumber,
+          scac: move.scac,
+          fromName: move.fromName,
+          toName: move.to.name,
+          toId: move.to.id,
+          toKind: move.to.kind,
+          kind: move.kind,
+          reason: move.reason,
+          detentionMinutes: move.benefit.detentionMinutes,
+          dockIdleMinutes: move.benefit.dockIdleMinutes,
+        })),
+      },
+    });
+  } catch {
+    // A suggestion must not stop the scripted move.
+  }
 }
 
 async function visitIdFor(db: Database, code: string): Promise<string> {
