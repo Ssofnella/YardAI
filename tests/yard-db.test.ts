@@ -5,7 +5,8 @@ import type { Database } from "@/lib/db/types";
 import { seedDemo } from "@/lib/seed/demo";
 import { insertEvent } from "@/lib/yard/event-store";
 import { clearReeferFlag, confirmArrivalDraft, performCheckIn, performCheckOut, receiveEmailDraft, acceptYardMove } from "@/lib/yard/operations";
-import { saveAllowedSenders } from "@/lib/yard/onboard";
+import { saveAllowedSenders, recordLayoutDecisions } from "@/lib/yard/onboard";
+import { layoutFromDoorCount } from "@/lib/onboarding/layout";
 import { createEvent } from "@/lib/domain/events";
 
 let db: Database;
@@ -222,5 +223,31 @@ describe("yard database", () => {
     );
     expect(after).toHaveLength(1);
     expect(after[0]?.trailer_number).toBe("HL-77100");
+  });
+
+  it("records a layout suggestion and whether it was accepted", async () => {
+    const draft = layoutFromDoorCount(1, { lng: -97.74, lat: 30.27 }, "Austin pin", false);
+    draft.doors = draft.doors.map((door, index) => ({
+      ...door,
+      status: index === 0 ? ("accepted" as const) : ("rejected" as const),
+    }));
+    draft.spots = draft.spots.map((spot, index) => ({
+      ...spot,
+      status: index === 0 ? ("accepted" as const) : ("suggested" as const),
+    }));
+    draft.factLines = ["Found: 1 dock-high doors (LoopNet)"];
+    draft.listingAccepted = true;
+    const written = await recordLayoutDecisions(db, draft);
+    expect(written).toBeGreaterThan(2);
+    const rows = await db.query<{ event_type: string }>(
+      `select event_type from events where payload->>'suggestionId' = 'layout:door-1'`,
+    );
+    expect(rows.map((row) => row.event_type).sort()).toEqual(["ai.accepted", "ai.suggested"]);
+    const fact = await db.query<{ event_type: string; display: string }>(
+      `select event_type, payload->>'display' as display from events where payload->>'kind' = 'listing_fact'`,
+    );
+    expect(fact.some((row) => row.event_type === "ai.suggested" && row.display.startsWith("Found:"))).toBe(true);
+    expect(fact.some((row) => row.event_type === "ai.accepted")).toBe(true);
+    expect(JSON.stringify(fact)).not.toMatch(/snippet|brochure/);
   });
 });

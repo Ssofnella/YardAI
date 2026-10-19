@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { FeedMode } from "@/lib/domain/config";
 import { NAIP_SCENE, type ImageryConfig } from "@/lib/imagery/naip";
+import type { ListingFact } from "@/lib/onboarding/listings";
 import { isPublishable, type LayoutDraft, type LayoutStatus } from "@/lib/onboarding/layout";
+import type { ParsedVision, PhotoKind } from "@/lib/onboarding/photo-draft";
+import { ImagerySourceCard, ListingFactsCard, PhotoUploadCard } from "@/components/onboard/sources";
 import { MapEditor } from "@/components/onboard/map-editor";
 import { cn } from "cn";
 
@@ -22,10 +25,16 @@ const SAMPLE = {
   lng: NAIP_SCENE.center.lng,
 };
 
+const STRATMAP_PIN = {
+  address: "StratMap pin · Austin, inside a published TxGIO county service",
+  lat: 30.2672,
+  lng: -97.7431,
+};
+
 const SAMPLE_CSV = `appointment_code,carrier_name,scac,trailer_number,load_id,load_type,empty_or_loaded,is_reefer,planned_at,setpoint_f,expected_seal
 APT-DEMO-1,Harborlight Freight,HRBR,HL-90001,LD-90001,inbound,loaded,true,2026-10-19T15:00:00Z,34,SL-90001`;
 
-const STORAGE = "yardline.onboarding.v2";
+const STORAGE = "yardline.onboarding.v3";
 
 type FeedInfo = {
   emailAddress: string | null;
@@ -69,6 +78,16 @@ export function OnboardingFlow() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [published, setPublished] = useState<{ version: number; webhookKey: string | null } | null>(null);
+  const [facts, setFacts] = useState<ListingFact[]>([]);
+  const [factsNote, setFactsNote] = useState<string | null>(null);
+  const [listingSkipped, setListingSkipped] = useState(false);
+  const [listingAccepted, setListingAccepted] = useState(true);
+  const [doorCountEdited, setDoorCountEdited] = useState(false);
+  const [vision, setVision] = useState<ParsedVision | null>(null);
+  const [underlayUrl, setUnderlayUrl] = useState<string | null>(null);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
+  const [photoKind, setPhotoKind] = useState<PhotoKind>("dock_wall");
+  const [fileName, setFileName] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -84,6 +103,11 @@ export function OnboardingFlow() {
           doorCount?: number;
           feedMode?: FeedMode;
           senders?: string[];
+          facts?: ListingFact[];
+          listingAccepted?: boolean;
+          vision?: ParsedVision | null;
+          underlayUrl?: string | null;
+          photoKind?: PhotoKind;
         };
         if (typeof saved.step === "number") setStep(saved.step);
         if (saved.address) setAddress(saved.address);
@@ -94,6 +118,11 @@ export function OnboardingFlow() {
         if (saved.doorCount) setDoorCount(saved.doorCount);
         if (saved.feedMode) setFeedMode(saved.feedMode);
         if (Array.isArray(saved.senders)) setSenders(saved.senders);
+        if (Array.isArray(saved.facts)) setFacts(saved.facts);
+        if (typeof saved.listingAccepted === "boolean") setListingAccepted(saved.listingAccepted);
+        if (saved.vision) setVision(saved.vision);
+        if (saved.underlayUrl) setUnderlayUrl(saved.underlayUrl);
+        if (saved.photoKind) setPhotoKind(saved.photoKind);
       }
     } catch {
       // A bad draft just starts the steps over.
@@ -119,14 +148,44 @@ export function OnboardingFlow() {
   }, []);
 
   useEffect(() => {
+    if (lat == null || lng == null) return;
+    void fetch(`/api/imagery/resolve?lat=${lat}&lng=${lng}`, { cache: "no-store" })
+      .then((response) => response.json())
+      .then((body: { imagery?: ImageryConfig }) => {
+        if (body.imagery) setImagery(body.imagery);
+      })
+      .catch(() => undefined);
+  }, [lat, lng]);
+
+  useEffect(() => {
     if (!ready) return;
     window.sessionStorage.setItem(
       STORAGE,
-      JSON.stringify({ step, address, label, lat, lng, draft, doorCount, feedMode, senders }),
+      JSON.stringify({
+        step,
+        address,
+        label,
+        lat,
+        lng,
+        draft,
+        doorCount,
+        feedMode,
+        senders,
+        facts,
+        listingAccepted,
+        vision,
+        underlayUrl,
+        photoKind,
+      }),
     );
-  }, [ready, step, address, label, lat, lng, draft, doorCount, feedMode, senders]);
+  }, [ready, step, address, label, lat, lng, draft, doorCount, feedMode, senders, facts, listingAccepted, vision, underlayUrl, photoKind]);
 
   const center = lat != null && lng != null ? { lat, lng } : null;
+  const listedDoors = listingAccepted ? facts.find((fact) => fact.field === "dock_high_doors")?.value : undefined;
+  function countForDraft(commitTemplate: boolean): number | undefined {
+    if (commitTemplate || doorCountEdited || !listedDoors) return doorCount;
+    return undefined;
+  }
   const publishableDoors = draft?.doors.filter(isPublishable).length ?? 0;
   const publishableSpots = draft?.spots.filter(isPublishable).length ?? 0;
   const lowSuggested = [
@@ -200,10 +259,10 @@ export function OnboardingFlow() {
     setError(null);
   }
 
-  async function loadDraft(options: { doorCount?: number; commitTemplate?: boolean; lat?: number; lng?: number }) {
+  async function loadDraft(options: { doorCount?: number; commitTemplate?: boolean; lat?: number; lng?: number }): Promise<boolean> {
     const useLat = options.lat ?? lat;
     const useLng = options.lng ?? lng;
-    if (useLat == null || useLng == null) return;
+    if (useLat == null || useLng == null) return false;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -217,6 +276,9 @@ export function OnboardingFlow() {
           address: label || address,
           doorCount: options.doorCount,
           commitTemplate: options.commitTemplate === true,
+          facts: listingAccepted ? facts : [],
+          listingAccepted,
+          vision,
         }),
       });
       const body = (await response.json()) as {
@@ -224,20 +286,104 @@ export function OnboardingFlow() {
         needsDoorCount?: boolean;
         error?: string;
         hint?: { attribution?: string } | null;
+        imagery?: ImageryConfig;
       };
       if (!response.ok) throw new Error(body.error || "Could not draft a layout");
+      if (body.imagery) setImagery(body.imagery);
       if (!body.draft) {
-        setNotice("No layout yet. Choose the grid template, or draw a wall and add doors.");
-        return;
+        setNotice("No layout yet. Choose the grid template, upload a photo, or draw a wall and add doors.");
+        return false;
       }
       setDraft(body.draft);
       const hintNote = body.hint?.attribution ? ` ${body.hint.attribution}` : "";
       setNotice(`${body.draft.note}${hintNote}`);
+      return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not draft a layout");
+      return false;
     } finally {
       setBusy(false);
     }
+  }
+
+  async function lookupFacts(demo: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/onboard/listings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(demo ? { demo: true } : { address: label || address }),
+      });
+      const body = (await response.json()) as {
+        facts?: ListingFact[];
+        skipped?: boolean;
+        reason?: string | null;
+        demo?: boolean;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(body.error || "Lookup failed");
+      const next = body.facts ?? [];
+      setFacts(next);
+      setListingSkipped(Boolean(body.skipped));
+      setListingAccepted(next.length > 0);
+      setFactsNote(body.reason || (body.demo ? "Demo facts for Lakeshore. Not a live listing search." : null));
+      const doors = next.find((fact) => fact.field === "dock_high_doors");
+      if (doors && !doorCountEdited) setDoorCount(doors.value);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Lookup failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadDataUrl(dataUrl: string, name: string) {
+    setBusy(true);
+    setError(null);
+    setFileName(name);
+    try {
+      const response = await fetch("/api/onboard/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataUrl, kind: photoKind }),
+      });
+      const body = (await response.json()) as {
+        url?: string;
+        contentType?: string;
+        vision?: ParsedVision | null;
+        note?: string;
+        error?: string;
+      };
+      if (!response.ok || !body.url) throw new Error(body.error || "Upload failed");
+      setUnderlayUrl(body.contentType?.startsWith("image/") ? body.url : null);
+      setVision(body.vision ?? null);
+      setUploadNote(body.note ?? null);
+      setNotice(body.note ?? "Photo saved as a reference.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Upload failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function uploadFile(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") void uploadDataUrl(reader.result, file.name);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function loadDemoPhoto() {
+    const response = await fetch("/demo/dock-reference.png");
+    const blob = await response.blob();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error("Could not read the demo photo"));
+      reader.readAsDataURL(blob);
+    });
+    await uploadDataUrl(dataUrl, "dock-reference.png");
   }
 
   function mark(
@@ -385,7 +531,7 @@ export function OnboardingFlow() {
           <p className="text-sm font-semibold tracking-wide text-primary">Guided setup</p>
           <h1 className="text-2xl font-semibold tracking-tight">Set up your yard</h1>
           <p className="max-w-2xl text-sm text-ink-muted">
-            Door marks from imagery are drafts. Nothing is saved until you accept it. Setup stays the place to edit after you finish.
+            The draft comes from a TxGIO or NAIP basemap, public listing facts, and a photo you upload. Nothing is saved until you accept it.
           </p>
         </div>
         <button type="button" className="min-h-12 rounded-card border-2 border-slate-950 px-3 text-sm font-semibold" onClick={() => router.push("/")}>
@@ -413,7 +559,7 @@ export function OnboardingFlow() {
       {notice ? <p className="rounded-card border-2 border-slate-950 bg-slate-50 p-3 text-sm">{notice}</p> : null}
 
       {step === 0 ? (
-        <section className="grid gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
+        <section data-testid="location-source-step" className="grid gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
           <div className="flex flex-col gap-4">
             <label className="flex flex-col gap-2 text-sm font-semibold">
               Site address
@@ -437,14 +583,74 @@ export function OnboardingFlow() {
               <button type="button" className="min-h-12 rounded-card bg-primary px-4 text-sm font-semibold text-white" onClick={useSamplePin}>
                 Use sample pin
               </button>
+              <button
+                type="button"
+                className="min-h-12 rounded-card border-2 border-slate-950 px-4 text-sm font-semibold"
+                onClick={() => {
+                  setAddress(STRATMAP_PIN.address);
+                  setLabel(STRATMAP_PIN.address);
+                  setLat(STRATMAP_PIN.lat);
+                  setLng(STRATMAP_PIN.lng);
+                  setDraft(null);
+                  setError(null);
+                }}
+              >
+                Use a StratMap county pin
+              </button>
             </div>
             {center ? (
               <p className="text-sm">{label || "Pinned"} · {center.lat.toFixed(5)}, {center.lng.toFixed(5)}</p>
             ) : (
               <p className="text-sm">Drop a pin to continue. The sample pin sits on the Texas 2022 NAIP scene shipped with Yardline.</p>
             )}
-            <button type="button" className="min-h-12 w-fit rounded-card bg-primary px-4 text-sm font-semibold text-white" disabled={!center} onClick={() => setStep(1)}>
-              Continue to doors and spots
+            <ImagerySourceCard imagery={imagery} />
+            <ListingFactsCard
+              facts={listingAccepted ? facts : []}
+              note={factsNote}
+              skipped={listingSkipped}
+              busy={busy}
+              onLookup={() => void lookupFacts(false)}
+              onDemo={() => void lookupFacts(true)}
+              onDismiss={() => {
+                setListingAccepted(false);
+                setFactsNote("Facts dismissed. They will not seed the door count.");
+              }}
+            />
+            <label className="text-sm font-semibold">
+              Door count
+              <input
+                type="number"
+                min={1}
+                max={40}
+                value={doorCount}
+                onChange={(event) => {
+                  setDoorCountEdited(true);
+                  setDoorCount(Number(event.target.value));
+                }}
+                className="mt-1 block min-h-12 w-24 rounded-card border-2 border-slate-950 px-2"
+              />
+            </label>
+            <p className="text-sm text-ink-muted">A listing can fill this in. You can change it before the draft is built.</p>
+            <PhotoUploadCard
+              kind={photoKind}
+              onKind={setPhotoKind}
+              note={uploadNote}
+              fileName={fileName}
+              busy={busy}
+              onFile={uploadFile}
+              onDemoPhoto={() => void loadDemoPhoto()}
+            />
+            <button
+              type="button"
+              className="min-h-12 w-fit rounded-card bg-primary px-4 text-sm font-semibold text-white"
+              disabled={!center || busy}
+              onClick={() => {
+                void loadDraft({ doorCount: countForDraft(false) }).then((ok) => {
+                  if (ok) setStep(1);
+                });
+              }}
+            >
+              Build draft and continue
             </button>
             <button
               type="button"
@@ -471,6 +677,7 @@ export function OnboardingFlow() {
               center={center}
               mode="pin"
               doors={[]}
+              underlayUrl={underlayUrl}
               onDoors={() => undefined}
               onPin={(point) => {
                 setLat(point.lat);
@@ -480,7 +687,7 @@ export function OnboardingFlow() {
             />
           ) : (
             <p className="rounded-card border-2 border-dashed border-line p-6 text-sm">
-              {imagery ? "Place a pin to preview USDA NAIP 2022." : "Loading the imagery settings…"}
+              {imagery ? "Place a pin to choose TxGIO StratMap or the NAIP fallback." : "Loading the imagery settings…"}
             </p>
           )}
         </section>
@@ -494,6 +701,7 @@ export function OnboardingFlow() {
               center={draft?.center ?? center}
               mode="edit"
               doors={draft?.doors ?? []}
+              underlayUrl={underlayUrl}
               onDoors={(doors) => {
                 setDraft((current) => {
                   if (current) return { ...current, doors };
@@ -518,14 +726,17 @@ export function OnboardingFlow() {
                   min={1}
                   max={40}
                   value={doorCount}
-                  onChange={(event) => setDoorCount(Number(event.target.value))}
+                  onChange={(event) => {
+                    setDoorCountEdited(true);
+                    setDoorCount(Number(event.target.value));
+                  }}
                   className="mt-1 block min-h-12 w-24 rounded-card border-2 border-slate-950 px-2"
                 />
               </label>
               <button type="button" className="min-h-16 rounded-card bg-primary px-4 text-sm font-semibold text-white" disabled={busy} onClick={() => void loadDraft({ doorCount, commitTemplate: true })}>
                 Use {doorCount}-door grid
               </button>
-              <button type="button" className="min-h-12 rounded-card border-2 border-slate-950 px-3 text-sm font-semibold" disabled={busy} onClick={() => void loadDraft({ doorCount })}>
+              <button type="button" className="min-h-12 rounded-card border-2 border-slate-950 px-3 text-sm font-semibold" disabled={busy} onClick={() => void loadDraft({ doorCount: countForDraft(false) })}>
                 Guess spacing only
               </button>
             </div>
@@ -534,6 +745,18 @@ export function OnboardingFlow() {
             </p>
           </div>
           <aside className="flex flex-col gap-3">
+            <div data-testid="merged-confirm" className="rounded-card border-2 border-slate-950 bg-white p-3">
+              <p className="text-sm font-semibold">Merged draft</p>
+              <p className="text-sm">Nothing is written into the yard until you accept a door and a spot, then finish setup.</p>
+              <p className="mt-1 text-sm">{imagery.label}</p>
+              {(draft?.factLines ?? []).map((line) => (
+                <p key={line} className="mt-1 text-sm">{line}</p>
+              ))}
+              {(draft?.conflicts ?? []).map((line) => (
+                <p key={line} className="mt-1 text-sm">{line}</p>
+              ))}
+              {underlayUrl ? <p className="mt-1 text-sm">Your photo is the reference underlay. Place or accept doors on it.</p> : null}
+            </div>
             <div className="rounded-card border-2 border-amber-700 bg-amber-50 p-3">
               <p className="text-sm font-semibold">Needs a look ({lowSuggested})</p>
               <p className="text-sm">Low confidence. At 0.6 m, dock doors are often invisible. Accept all remaining skips these.</p>
@@ -561,7 +784,7 @@ export function OnboardingFlow() {
             </button>
             <SuggestionList
               title="Doors"
-              rows={(draft?.doors ?? []).map((door) => ({ ...door, meta: door.type }))}
+              rows={(draft?.doors ?? []).map((door) => ({ ...door, meta: `${door.type} · ${door.sourceLabel ?? door.provenance}` }))}
               onName={(key, name) =>
                 setDraft((current) =>
                   current
@@ -584,7 +807,7 @@ export function OnboardingFlow() {
             />
             <SuggestionList
               title="Spots"
-              rows={(draft?.spots ?? []).map((spot) => ({ ...spot, meta: `${spot.zone} · ${spot.type}` }))}
+              rows={(draft?.spots ?? []).map((spot) => ({ ...spot, meta: `${spot.zone} · ${spot.type} · ${spot.sourceLabel ?? spot.provenance}` }))}
               onName={(key, name) =>
                 setDraft((current) =>
                   current

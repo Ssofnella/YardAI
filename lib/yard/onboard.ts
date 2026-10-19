@@ -1,9 +1,12 @@
+import { createEvent } from "@/lib/domain/events";
 import type { FeedMode, SiteConfigSnapshot } from "@/lib/domain/config";
 import { normalizeFeeds } from "@/lib/domain/config";
 import type { Database } from "@/lib/db/types";
 import { YardError } from "@/lib/db/types";
+import { layoutDecisions } from "@/lib/onboarding/decisions";
 import { newFeedKey } from "@/lib/onboarding/keys";
 import { isPublishable, layoutToSnapshot, type LayoutDraft } from "@/lib/onboarding/layout";
+import { insertEvent } from "@/lib/yard/event-store";
 import { loadConfig, requireSite } from "@/lib/yard/context";
 import { publishConfig } from "@/lib/yard/operations";
 
@@ -77,10 +80,39 @@ export async function confirmOnboarding(
     webhookHint,
     allowedSenders: senders,
   });
+  if (draft.imageryProvider === "txgio" || draft.imageryProvider === "naip" || draft.imageryProvider === "plain") {
+    snapshot.imagery = { ...snapshot.imagery, provider: draft.imageryProvider };
+  }
   const published = await publishConfig(db, snapshot, "Guided setup");
+  await recordLayoutDecisions(db, draft);
   await db.query(
     `update sites set address = $2, latitude = $3, longitude = $4, onboarded_at = now() where id = $1`,
     [site.id, draft.address || null, draft.center.lat, draft.center.lng],
   );
   return { version: published.version, webhookKey, webhookHint };
+}
+
+/** Write a suggestion and an accept or dismiss event for each layout item and listing fact. */
+export async function recordLayoutDecisions(db: Database, draft: LayoutDraft): Promise<number> {
+  const decisions = layoutDecisions(draft);
+  if (!decisions.length) return 0;
+  await db.transaction(async (tx) => {
+    const site = await requireSite(tx);
+    const occurredAt = new Date().toISOString();
+    for (const decision of decisions) {
+      await insertEvent(
+        tx,
+        createEvent({
+          siteId: site.id,
+          companyId: site.companyId,
+          eventType: decision.eventType,
+          location: site.name,
+          occurredAt,
+          source: "manual",
+          payload: decision.payload,
+        }),
+      );
+    }
+  });
+  return decisions.length;
 }

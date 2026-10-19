@@ -41,8 +41,10 @@ To start the morning over, use **Reset to morning** on the Simulator page, or de
 
 `/onboard` (also `/onboarding`) is the first-run path. Setup remains the editor after that.
 
-- **Location.** Drop a pin or use this browser's location. The sample pin is the Texas 2022 NAIP scene shipped in `public/imagery`. Address search stays off until `YARD_GEOCODER=mapbox_permanent` and a server-only `YARD_MAPBOX_TOKEN`.
-- **Doors and spots.** The map is [MapLibre](https://maplibre.org/) plus [Terra Draw](https://github.com/JamesLMilner/terra-draw): select, wall, door, zone, snapping, undo, and redo. "Add doors along this wall" spaces a count at about 4 m. Those marks are low confidence until you accept the group. "Accept all remaining" skips low confidence. A grid you choose can be published immediately. OpenStreetMap outlines are off unless `YARD_OSM_HINTS=on`, and they are not stored in the yard.
+- **Location and sources.** Drop a pin or use this browser's location. The sample pin is the Texas 2022 NAIP scene shipped in `public/imagery`. A second pin (Austin) sits inside a published TxGIO StratMap county service. Address search stays off until `YARD_GEOCODER=mapbox_permanent` and a server-only `YARD_MAPBOX_TOKEN`. The basemap is chosen per pin: TxGIO StratMap where a public county service covers it, USDA NAIP otherwise. Google, Mapbox, and Esri imagery are not used. See `docs/imagery-licensing.md`.
+- **Listing facts.** With `YARD_SEARCH_API_KEY` and `YARD_AI_API_KEY`, an AI step reads a search-API response for dock-high doors, drive-in doors, square footage, and clear height. Each fact is shown as `Found: 20 dock-high doors (source)` and can seed the door count, which you can edit. Without either key the step is skipped. The demo button shows fictional Lakeshore facts and does not call a listing site. Snippets, listing photos, and copied prose are not stored.
+- **Your photo or plan.** Upload a site plan image, a drone photo, or a dock-wall photo. With an AI key, vision proposes doors (and spots on overhead images and plans). Without a key, the image is a reference underlay and you place doors yourself. A PDF is stored as your reference and is not mined for text.
+- **Doors and spots.** The map is [MapLibre](https://maplibre.org/) plus [Terra Draw](https://github.com/JamesLMilner/terra-draw): select, wall, door, zone, snapping, undo, and redo. "Add doors along this wall" spaces a count at about 4 m. Those marks are low confidence until you accept the group. "Accept all remaining" skips low confidence. A grid you choose can be published immediately. Sources are merged into one draft with a confidence and a source label on each item. Nothing is published until you accept it. Finishing setup writes `ai.suggested` and either `ai.accepted` or `ai.dismissed` for each item. OpenStreetMap outlines are off unless `YARD_OSM_HINTS=on`, and they are not stored in the yard.
 - **Feeds.** Manual, CSV import, email-in, and a webhook. WMS and TMS connectors stay coming soon. Email is accepted only from allowlisted sender domains, and each message becomes a draft until a person confirms it.
 - **Gate.** The recommendation card is rules (closest powered door, holding spot, empty to the back row, a later appointment stays off a door). Check-in never waits on it. Tap Use to accept. Choose another, or ignore the card, and the suggestion is logged as dismissed.
 - **Optimize.** Scan the yard, then Send to driver queue. That inserts a hostler task and `move.requested`. The trailer stays put until a driver finishes the task. Held trailers are not suggested.
@@ -66,7 +68,7 @@ browser (Next.js App Router, PWA)
 
 Postgres is embedded ([PGlite](https://pglite.dev/)) when `DATABASE_URL` is empty, and any Postgres (including Supabase) when `DATABASE_URL` is set. The SQL is `supabase/migrations/0001_schema.sql` plus `0003_onboarding.sql` (site location, feed keys, arrival drafts). Row-level security is `supabase/migrations/0002_rls.sql` and is applied on Supabase only, because it calls `auth.uid()`.
 
-The default basemap is self-hosted USDA NAIP, public domain, capture year 2022, one Texas quarter-quad. The browser requests `/imagery/naip/...` on this origin. Google, Mapbox, and Esri tiles are not used for tracing or as model input. A licensed tile URL is display-only, and only when `YARD_LICENSED_IMAGERY=on` and `YARD_LICENSED_TILE_URL` are both set.
+The default basemap is self-hosted USDA NAIP, public domain, capture year 2022, one Texas quarter-quad, unless the pin is inside a catalogued TxGIO StratMap county service. Those county flights are public domain and finer than NAIP (about 6 inch, or 3 inch for the 2020 Capital Area and McLennan service). The browser requests `/imagery/naip/...` or `/api/imagery/txgio/...` on this origin. The tile proxy calls only `imagery.geographic.texas.gov`. Google, Mapbox, and Esri imagery are not used for tracing or as model input. The licensed Hexagon Texas Imagery Service is not used. A licensed tile URL is display-only, and only when `YARD_LICENSED_IMAGERY=on` and `YARD_LICENSED_TILE_URL` are both set. Details and caveats are in `docs/imagery-licensing.md`.
 
 The browser never opens Postgres. It polls `GET /api/state` and listens to `GET /api/stream` (server-sent events once a second). That stream is the local stand-in for Supabase Realtime. Both modes use the same events.
 
@@ -131,7 +133,7 @@ PGlite is for the laptop demo. Vercel has no durable disk, so production must se
    - `NEXT_PUBLIC_SUPABASE_URL` — Project URL (optional until Auth or Realtime is wired)
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` — anon key (optional, same reason)
    - `SUPABASE_SERVICE_ROLE_KEY` — service role (optional, server-only, never `NEXT_PUBLIC_`)
-   - Leave the imagery, geocoder, and AI variables at the defaults in `.env.example` unless you have reviewed a paid provider. `YARD_AI_API_KEY` and `YARD_MAPBOX_TOKEN` are server-only.
+   - Leave the imagery, geocoder, search, and AI variables at the defaults in `.env.example` unless you have reviewed a provider. `YARD_AI_API_KEY`, `YARD_SEARCH_API_KEY`, and `YARD_MAPBOX_TOKEN` are server-only. `YARD_IMAGERY_PROVIDER=auto` uses TxGIO StratMap on covered Texas counties and NAIP elsewhere.
 5. Deploy. The first request seeds Lakeshore Provisions if `companies` is empty.
 6. Open the deployment. Play the shift from **Simulator**.
 
@@ -168,7 +170,10 @@ Deferred from the same spec:
 Deferred from the 19 Oct guided-setup and suggestion specs:
 
 - Separate pages for each onboarding step, portrait bottom sheet, and a 0.5 m nudge pad.
-- Multi-select, renumber preview, site-plan upload, and Microsoft building footprints.
+- Multi-select, renumber preview, and Microsoft building footprints.
+- Rasterizing a site-plan PDF in the browser. The PDF is stored as a reference and is not mined for text. A page image can be the underlay.
+- A live refresh of the TxGIO StratMap service list. The catalog is the public folder as of 19 Oct 2026. Dallas and Collin are not in that folder, so those pins use NAIP.
+- The licensed Hexagon Texas Imagery Service. It is not public domain.
 - `ai_suggestions` / `ai_feedback` tables and a weekly accept-rate screen. Suggestions are events (`ai.suggested`, `ai.accepted`, `ai.dismissed`, `ai.asked`) today.
 - Risk snooze, temperature trend, and lost-trailer flags.
 - A driver screen that completes the hostler task. Optimize only queues it.
@@ -190,6 +195,7 @@ Deferred from the 19 Oct guided-setup and suggestion specs:
 - Outbox flush: one row per client id, and a flush that stops halfway does not send the saved row again.
 - `npm run test:touch` (Playwright) checks glove-sized targets on `/`, `/gate`, and `/doors` at 1180×820.
 - Rules recommendations, optimize ranking (held trailers excluded), ask-the-yard citations, NAIP tile host, door-draft confidence, and email allowlist plus a draft that does not become an arrival until confirm.
+- TxGIO StratMap selection inside a published county service, NAIP outside it, listing facts that keep a source URL and drop prose, a photo draft that stays unconfirmed, and a suggestion plus an accept or dismiss event for each merged item.
 - A Postgres check that Send to driver queue writes `move.requested` and does not change the visit location, and that a non-allowlisted sender writes no draft.
 
 ## Layout

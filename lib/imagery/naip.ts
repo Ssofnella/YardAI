@@ -20,7 +20,7 @@ export const NAIP_SCENE = {
   tileTemplate: "/imagery/naip/2022/tx/{z}/{x}/{y}.png",
 };
 
-export type ImageryProviderId = "naip" | "plain" | "licensed_basemap";
+export type ImageryProviderId = "naip" | "plain" | "licensed_basemap" | "txgio";
 
 export type ImageryConfig = {
   provider: ImageryProviderId;
@@ -33,13 +33,24 @@ export type ImageryConfig = {
   center: { lng: number; lat: number };
   licensedEnabled: boolean;
   note: string;
+  /** Shown on the map. Aerial pixels are never sent to a model. */
+  attribution: string;
+  resolutionM: number | null;
+  sendsToModel: false;
+  /** Service id for a county ortho collection, when the provider has one. */
+  collection: string | null;
 };
 
 export function imageryConfig(): ImageryConfig {
   const licensed = process.env.YARD_LICENSED_IMAGERY === "on";
   const requested = process.env.YARD_IMAGERY_PROVIDER?.trim() || "naip";
+  const shared = {
+    sendsToModel: false as const,
+    collection: null,
+  };
   if (requested === "plain") {
     return {
+      ...shared,
       provider: "plain",
       captureYear: NAIP_SCENE.captureYear,
       label: "No imagery. Draw on a plain canvas.",
@@ -50,10 +61,13 @@ export function imageryConfig(): ImageryConfig {
       center: NAIP_SCENE.center,
       licensedEnabled: licensed,
       note: "Plain canvas. Door marks are still drafts until you accept them.",
+      attribution: "No aerial imagery.",
+      resolutionM: null,
     };
   }
   if (requested === "licensed_basemap" && licensed && process.env.YARD_LICENSED_TILE_URL?.trim()) {
     return {
+      ...shared,
       provider: "licensed_basemap",
       captureYear: Number(process.env.YARD_LICENSED_CAPTURE_YEAR || NAIP_SCENE.captureYear),
       label: "Licensed imagery (legal review required). Not used as model input.",
@@ -64,9 +78,12 @@ export function imageryConfig(): ImageryConfig {
       center: NAIP_SCENE.center,
       licensedEnabled: true,
       note: "Licensed tiles are display-only. Yardline does not send them to a model.",
+      attribution: "Licensed basemap. Display only.",
+      resolutionM: null,
     };
   }
   return {
+    ...shared,
     provider: "naip",
     captureYear: NAIP_SCENE.captureYear,
     label: NAIP_SCENE.label,
@@ -82,6 +99,8 @@ export function imageryConfig(): ImageryConfig {
     center: NAIP_SCENE.center,
     licensedEnabled: licensed,
     note: "This imagery is from 2022. Your yard may have changed. At 0.6 m, dock doors are often invisible, so door marks are a spacing guess until you accept them.",
+    attribution: "USDA Farm Service Agency NAIP. Public domain.",
+    resolutionM: NAIP_SCENE.resolutionM,
   };
 }
 

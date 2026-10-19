@@ -23,3 +23,17 @@ export function emailInboundDomain(): string {
 export function osmHintsEnabled(): boolean {
   return process.env.YARD_OSM_HINTS === "on";
 }
+
+export type ImageryPreference = "auto" | "naip" | "txgio" | "plain" | "licensed_basemap";
+
+/** auto uses a TxGIO StratMap county service where one is published, then NAIP. */
+export function imageryPreference(): ImageryPreference {
+  const value = process.env.YARD_IMAGERY_PROVIDER?.trim() || "auto";
+  if (value === "naip" || value === "txgio" || value === "plain" || value === "licensed_basemap") return value;
+  return "auto";
+}
+
+export function listingLookupEnabled(): boolean {
+  if (process.env.YARD_SEARCH_PROVIDER?.trim() === "off") return false;
+  return Boolean(process.env.YARD_SEARCH_API_KEY?.trim() && process.env.YARD_AI_API_KEY?.trim());
+}

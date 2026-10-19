@@ -66,7 +66,7 @@ export type SpotDef = {
 };
 
 export type FeedMode = "manual" | "csv" | "email" | "webhook";
-export type ImageryProviderId = "naip" | "plain" | "licensed_basemap";
+export type ImageryProviderId = "naip" | "plain" | "licensed_basemap" | "txgio";
 export type GeocoderSetting = "manual_pin" | "device_gps" | "mapbox_permanent";
 export type AiRuntimeSetting = "rules" | "model";
 
@@ -459,7 +459,7 @@ export function normalizeFeeds(input: Partial<SiteFeeds> | null | undefined): Si
   };
 }
 
-const IMAGERY = new Set<ImageryProviderId>(["naip", "plain", "licensed_basemap"]);
+const IMAGERY = new Set<ImageryProviderId>(["naip", "plain", "licensed_basemap", "txgio"]);
 const GEOCODERS = new Set<GeocoderSetting>(["manual_pin", "device_gps", "mapbox_permanent"]);
 
 export function normalizeImagery(input: Partial<ImagerySettings> | null | undefined): ImagerySettings {

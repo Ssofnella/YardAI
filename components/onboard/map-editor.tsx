@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ImageryConfig } from "@/lib/imagery/naip";
 import { insideNaip } from "@/lib/imagery/naip";
 import { doorsAlongWall, type LayoutDoor } from "@/lib/onboarding/layout";
-import { distanceMeters, type LngLat } from "@/lib/onboarding/geo";
+import { bboxAround, distanceMeters, type LngLat } from "@/lib/onboarding/geo";
 import { cn } from "cn";
 
 type Props = {
@@ -14,6 +14,7 @@ type Props = {
   doors: LayoutDoor[];
   onDoors: (doors: LayoutDoor[]) => void;
   onPin?: (point: LngLat) => void;
+  underlayUrl?: string | null;
 };
 
 const TOOLS = [
@@ -23,7 +24,7 @@ const TOOLS = [
   { id: "polygon", label: "Zone" },
 ] as const;
 
-export function MapEditor({ imagery, center, mode, doors, onDoors, onPin }: Props) {
+export function MapEditor({ imagery, center, mode, doors, onDoors, onPin, underlayUrl }: Props) {
   const holder = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const drawRef = useRef<{
@@ -44,7 +45,11 @@ export function MapEditor({ imagery, center, mode, doors, onDoors, onPin }: Prop
   const [tool, setTool] = useState<(typeof TOOLS)[number]["id"]>("select");
   const [count, setCount] = useState(20);
   const [message, setMessage] = useState<string | null>(null);
-  const covered = insideNaip(center.lng, center.lat) && imagery.provider === "naip";
+  const covered =
+    imagery.provider === "txgio" ||
+    imagery.provider === "plain" ||
+    imagery.provider === "licensed_basemap" ||
+    (imagery.provider === "naip" && insideNaip(center.lng, center.lat));
 
   useEffect(() => {
     const node = holder.current;
@@ -94,6 +99,25 @@ export function MapEditor({ imagery, center, mode, doors, onDoors, onPin }: Prop
       });
       map.on("load", () => {
         if (!map) return;
+        if (underlayUrl) {
+          const box = bboxAround({ lng: center.lng, lat: center.lat }, 70);
+          map.addSource("upload-underlay", {
+            type: "image",
+            url: underlayUrl,
+            coordinates: [
+              [box.west, box.north],
+              [box.east, box.north],
+              [box.east, box.south],
+              [box.west, box.south],
+            ],
+          });
+          map.addLayer({
+            id: "upload-underlay",
+            type: "raster",
+            source: "upload-underlay",
+            paint: { "raster-opacity": 0.72 },
+          });
+        }
         map.addSource("draft-doors", {
           type: "geojson",
           data: doorCollection(doorsRef.current),
@@ -149,7 +173,7 @@ export function MapEditor({ imagery, center, mode, doors, onDoors, onPin }: Prop
       mapRef.current = null;
       drawRef.current = null;
     };
-  }, [center.lng, center.lat, imagery.tileTemplate, imagery.label, imagery.maxZoom, imagery.minZoom, imagery.bounds.west, imagery.bounds.south, imagery.bounds.east, imagery.bounds.north, mode, covered]);
+  }, [center.lng, center.lat, imagery.tileTemplate, imagery.label, imagery.maxZoom, imagery.minZoom, imagery.bounds.west, imagery.bounds.south, imagery.bounds.east, imagery.bounds.north, mode, covered, underlayUrl]);
 
   useEffect(() => {
     const source = mapRef.current?.getSource("draft-doors") as { setData?: (data: GeoJSON.FeatureCollection) => void } | undefined;
@@ -278,8 +302,9 @@ export function MapEditor({ imagery, center, mode, doors, onDoors, onPin }: Prop
           <p className="max-w-xl text-sm text-ink-muted">
             {covered
               ? imagery.note
-              : "This pin is outside the NAIP 2022 Texas scene shipped with Yardline. Use a grid template, or move the pin into that scene."}
+              : "This pin is outside the imagery shipped for this basemap. Use a grid template, upload your own photo, or move the pin."}
           </p>
+          <p className="w-full text-xs text-ink-muted">{imagery.attribution}</p>
         </div>
       ) : (
         <p className="text-sm text-ink-muted">{imagery.note} Drag the pin onto the building. That sets the location to a pin you placed.</p>

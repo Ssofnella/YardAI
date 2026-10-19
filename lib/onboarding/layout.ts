@@ -2,7 +2,7 @@ import type { DoorType, SiteConfigSnapshot, SpotType } from "@/lib/domain/config
 import { validateSnapshot } from "@/lib/domain/config";
 import { distanceMeters, offsetMeters, ringCentroid, type LngLat } from "@/lib/onboarding/geo";
 
-export type LayoutSource = "template" | "user_drawn" | "door_count" | "osm_hint";
+export type LayoutSource = "template" | "user_drawn" | "door_count" | "osm_hint" | "photo" | "listing";
 export type LayoutStatus = "suggested" | "accepted" | "edited" | "rejected";
 export type LayoutConfidence = "high" | "medium" | "low";
 
@@ -14,6 +14,8 @@ export type LayoutDoor = {
   status: LayoutStatus;
   confidence: LayoutConfidence;
   provenance: "ai_suggested" | "user_drawn" | "template" | "osm_hint";
+  /** Short label such as "Listing door count" or "Dock photo". */
+  sourceLabel?: string;
 };
 
 export type LayoutSpot = {
@@ -25,6 +27,7 @@ export type LayoutSpot = {
   status: LayoutStatus;
   confidence: LayoutConfidence;
   provenance: "ai_suggested" | "user_drawn" | "template" | "osm_hint";
+  sourceLabel?: string;
 };
 
 export type LayoutDraft = {
@@ -36,6 +39,11 @@ export type LayoutDraft = {
   dockFace: "north" | "south" | "east" | "west";
   doors: LayoutDoor[];
   spots: LayoutSpot[];
+  /** Display lines such as "Found: 20 dock-high doors (LoopNet)". Facts only. */
+  factLines?: string[];
+  listingAccepted?: boolean;
+  imageryProvider?: "naip" | "txgio" | "plain" | "licensed_basemap";
+  conflicts?: string[];
 };
 
 function clampDoors(count: number): number {
@@ -68,6 +76,7 @@ export function doorsAlongWall(from: LngLat, to: LngLat, count: number): LayoutD
       status: "suggested",
       confidence: "low",
       provenance: "ai_suggested",
+      sourceLabel: "Wall you drew",
     });
   }
   return items;
@@ -102,6 +111,7 @@ export function layoutFromDoorCount(
       status: commit ? "accepted" : "suggested",
       confidence: "low",
       provenance: commit ? "template" : "ai_suggested",
+      sourceLabel: commit ? "Grid you chose" : "Door count you entered",
     });
   }
   const spots = spotRows(offsetMeters(center, 0, south - 18), doors, 0, -7, commit);
@@ -156,6 +166,7 @@ function spotRows(
         status: commit ? "accepted" : "suggested",
         confidence: "low",
         provenance: commit ? "template" : "ai_suggested",
+        sourceLabel: commit ? "Grid you chose" : "Spacing beside that door count",
         position: offsetMeters(
           origin,
           stepEast * line + perpEast * lateral,
@@ -225,12 +236,14 @@ export function layoutFromFootprint(
       status: "suggested",
       confidence: "low",
       provenance: options.source === "osm_hint" ? "osm_hint" : "ai_suggested",
+      sourceLabel: options.source === "osm_hint" ? "OpenStreetMap hint" : "Building outline",
     });
   }
   const anchor = offsetMeters(edge.mid, outEast * 2.2, outNorth * 2.2);
   const spots = spotRows(anchor, doorCount, (outEast / 8) * 7, (outNorth / 8) * 7, false).map((spot) => ({
     ...spot,
     provenance: options.source === "osm_hint" ? ("osm_hint" as const) : spot.provenance,
+    sourceLabel: options.source === "osm_hint" ? "OpenStreetMap hint" : spot.sourceLabel,
     status: "suggested" as const,
   }));
   const closed =
